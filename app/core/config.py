@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     # Signed URL tokens
     SIGNED_URL_SECRET: str = "change-me-signed-url-secret"
     BASE_URL: str = "http://localhost:8000"   # Used when building share links
+    
+    # Email/Webhook
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_FROM: str = "noreply@phantomshare.io"
  
     class Config:
         env_file = ".env"
