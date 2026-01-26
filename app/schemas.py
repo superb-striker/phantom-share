@@ -107,3 +107,27 @@ class StatsResponse(BaseModel):
     total_secrets_created: int
     total_secrets_viewed: int
     active_secrets: int
+    
+# Audit
+ 
+class AuditLogItem(BaseModel):
+    id: int
+    action: str
+    actor_id: Optional[UUID]
+    actor_ip: Optional[str]
+    secret_id: Optional[str]
+    metadata: dict
+    created_at: datetime
+ 
+class AuditLogResponse(BaseModel):
+    items: List[AuditLogItem]
+    total: int
+    page: int
+    page_size: int
+ 
+ # Key management
+ 
+class KeyRotateResponse(BaseModel):
+    secret_id: str
+    new_key_version: int
+    rotated_at: datetime
