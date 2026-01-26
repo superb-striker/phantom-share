@@ -1,5 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-SELECT gen_random_uuid();
+-- SELECT gen_random_uuid();
 CREATE EXTENSION IF NOT EXISTS "citext";
 
 DO $$ BEGIN
@@ -11,12 +11,11 @@ DO $$ BEGIN
         'secret_created',
         'secret_viewed',
         'secret_deleted',
-        'secret_expired',
         'user_registered',
         'user_login',
         'user_logout',
-        'key_rotated',
-        'admin_cleanup'
+		'user_removed',
+        'key_rotated'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -29,7 +28,8 @@ CREATE TABLE IF NOT EXISTS public.users (
     is_active       BOOLEAN         NOT NULL DEFAULT TRUE,
     is_verified     BOOLEAN         NOT NULL DEFAULT FALSE,
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
+    updated_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
+	delete_after TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email    ON public.users (email);
@@ -38,7 +38,7 @@ CREATE INDEX IF NOT EXISTS idx_users_username ON public.users (username);
 CREATE TABLE IF NOT EXISTS public.sessions (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id         UUID            NOT NULL REFERENCES public.users(id) ON DELETE CASCADE,
-    refresh_token   VARCHAR(512)    NOT NULL UNIQUE,
+    refresh_token_hash  TEXT  NOT NULL UNIQUE,
     user_agent      TEXT,
     ip_address      INET,
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW(),
@@ -47,41 +47,44 @@ CREATE TABLE IF NOT EXISTS public.sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id       ON public.sessions (user_id);
-CREATE INDEX IF NOT EXISTS idx_sessions_refresh_token ON public.sessions (refresh_token);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON public.sessions (expires_at);
 
 CREATE TABLE IF NOT EXISTS public.secrets (
-    id character varying COLLATE pg_catalog."default" NOT NULL,
-    content character varying COLLATE pg_catalog."default" NOT NULL,
-    password_protected boolean NOT NULL DEFAULT false,
-    access_password character varying COLLATE pg_catalog."default",
-    ttl_hours integer NOT NULL DEFAULT 24,
-    created_at timestamp with time zone NOT NULL DEFAULT now(),
-    expires_at timestamp with time zone NOT NULL,
-    qr_code character varying COLLATE pg_catalog."default",
-    viewed boolean NOT NULL DEFAULT false,
-    CONSTRAINT secret_pkey PRIMARY KEY (id),
-    CONSTRAINT check_ttl_range CHECK (ttl_hours >= 1 AND ttl_hours <= 168)
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    content             TEXT NOT NULL,
+    password_protected  BOOLEAN NOT NULL DEFAULT FALSE,
+    access_password_hash TEXT,
+    ttl_hours           INTEGER NOT NULL DEFAULT 24,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at          TIMESTAMPTZ NOT NULL,
+    qr_code             TEXT,
+    viewed              BOOLEAN NOT NULL DEFAULT FALSE,
+    owner_id            UUID REFERENCES public.users(id) ON DELETE SET NULL,
+    nonce               TEXT,
+    max_views           INTEGER NOT NULL DEFAULT 1,
+    view_count          INTEGER NOT NULL DEFAULT 0,
+    signed_token        TEXT,
+    notify_on_view      BOOLEAN NOT NULL DEFAULT FALSE,
+    notify_email        VARCHAR(256),
+    webhook_url         VARCHAR(512),
+    -- Constraints
+    CONSTRAINT check_ttl_range CHECK (ttl_hours >= 1 AND ttl_hours <= 168),
+    CONSTRAINT check_view_count CHECK (view_count <= max_views),
+    CONSTRAINT check_password_consistency CHECK (
+        (password_protected = TRUE AND access_password_hash IS NOT NULL)
+        OR
+        (password_protected = FALSE AND access_password_hash IS NULL)
+    )
 );
-
-ALTER TABLE public.secrets
-    ADD COLUMN IF NOT EXISTS owner_id           UUID        REFERENCES public.users(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS nonce              VARCHAR     ,   -- ChaCha20 nonce (base64)
-    ADD COLUMN IF NOT EXISTS max_views          INTEGER     DEFAULT 1,
-    ADD COLUMN IF NOT EXISTS view_count         INTEGER     NOT NULL DEFAULT 0,
-    ADD COLUMN IF NOT EXISTS signed_token       VARCHAR     ,   -- signed share token
-    ADD COLUMN IF NOT EXISTS notify_on_view     BOOLEAN     NOT NULL DEFAULT FALSE,
-    ADD COLUMN IF NOT EXISTS notify_email       VARCHAR(256),
-    ADD COLUMN IF NOT EXISTS webhook_url        VARCHAR(512),
-    ADD COLUMN IF NOT EXISTS deleted_at         TIMESTAMPTZ ;   -- soft-delete
 
 CREATE INDEX IF NOT EXISTS idx_secrets_owner_id    ON public.secrets (owner_id);
 CREATE INDEX IF NOT EXISTS idx_secrets_expires_at  ON public.secrets (expires_at);
-CREATE INDEX IF NOT EXISTS idx_secrets_viewed      ON public.secrets (viewed);
-CREATE INDEX IF NOT EXISTS idx_secrets_deleted_at  ON public.secrets (deleted_at);
+CREATE INDEX IF NOT EXISTS idx_secrets_view_count      ON public.secrets (view_count, max_views);
+CREATE INDEX IF NOT EXISTS idx_secrets_active ON public.secrets (expires_at);
 
 CREATE TABLE IF NOT EXISTS public.secret_keys (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    secret_id       VARCHAR         NOT NULL REFERENCES public.secrets(id) ON DELETE CASCADE,
+    secret_id       UUID         NOT NULL REFERENCES public.secrets(id) ON DELETE CASCADE,
     -- The per-secret DEK is itself encrypted with the master KEK.
     -- Server stores only the wrapped key; plaintext DEK is ephemeral.
     wrapped_dek     TEXT            NOT NULL,   -- base64(KEK.encrypt(DEK))
@@ -99,7 +102,7 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
     action          audit_action    NOT NULL,
     actor_id        UUID            REFERENCES public.users(id) ON DELETE SET NULL,
     actor_ip        INET            ,
-    secret_id       VARCHAR         REFERENCES public.secrets(id) ON DELETE SET NULL,
+    secret_id       UUID         REFERENCES public.secrets(id) ON DELETE SET NULL,
     metadata        JSONB           DEFAULT '{}'::jsonb,
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
 );
@@ -108,6 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_actor_id  ON public.audit_logs (actor_
 CREATE INDEX IF NOT EXISTS idx_audit_logs_secret_id ON public.audit_logs (secret_id);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_action    ON public.audit_logs (action);
 CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at ON public.audit_logs (created_at DESC);
+
 
 CREATE OR REPLACE FUNCTION trigger_set_updated_at()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -122,10 +126,11 @@ CREATE TRIGGER set_users_updated_at
     BEFORE UPDATE ON public.users
     FOR EACH ROW EXECUTE FUNCTION trigger_set_updated_at();
 
+
 CREATE OR REPLACE FUNCTION calculate_expiration()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
-    NEW.expires_at := NEW.created_at + (NEW.ttl_hours || ' hours')::interval;
+    NEW.expires_at := NOW() + (NEW.ttl_hours || ' hours')::interval;
     RETURN NEW;
 END;
 $$;
@@ -136,3 +141,63 @@ CREATE OR REPLACE TRIGGER trg_set_expires_at
     FOR EACH ROW EXECUTE FUNCTION calculate_expiration();
 
 
+CREATE OR REPLACE FUNCTION delete_secret_if_fully_viewed()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.view_count >= NEW.max_views THEN
+        INSERT INTO audit_logs (action, secret_id, metadata)
+        VALUES (
+            'secret_deleted',
+            NEW.id,
+            jsonb_build_object(
+                'reason', 'max_views_achieved',
+                'source', 'postgres_trigger',
+                'view_count', NEW.view_count,
+                'max_views', NEW.max_views
+            )
+        );
+        DELETE FROM secrets WHERE id = NEW.id;
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_delete_fully_viewed_secret ON public.secrets;
+CREATE TRIGGER trg_delete_fully_viewed_secret
+    AFTER UPDATE OF view_count ON public.secrets
+    FOR EACH ROW EXECUTE FUNCTION delete_secret_if_fully_viewed();
+
+
+CREATE OR REPLACE FUNCTION schedule_user_deletion()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.is_active = FALSE AND OLD.is_active = TRUE THEN
+        NEW.delete_after := NOW() + INTERVAL '2 days';
+    ELSIF NEW.is_active = TRUE THEN
+        NEW.delete_after := NULL;  -- clear if reactivated
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_schedule_user_deletion ON public.users;
+CREATE TRIGGER trg_schedule_user_deletion
+    BEFORE UPDATE OF is_active ON public.users
+    FOR EACH ROW EXECUTE FUNCTION schedule_user_deletion();
+
+
+CREATE OR REPLACE FUNCTION delete_session_if_invalid()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.revoked = TRUE OR NEW.expires_at <= NOW() THEN
+        DELETE FROM sessions WHERE id = NEW.id;
+        RETURN NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_delete_invalid_session ON public.sessions;
+CREATE TRIGGER trg_delete_invalid_session
+    AFTER UPDATE OF revoked, expires_at ON public.sessions
+    FOR EACH ROW EXECUTE FUNCTION delete_session_if_invalid();
