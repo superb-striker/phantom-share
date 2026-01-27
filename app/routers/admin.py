@@ -122,20 +122,21 @@ async def change_role(
                 raise HTTPException(404, "User not found")
     return {"user_id": str(user_id), "new_role": role}
 
-@router.patch("/users/{user_id}/deactivate")
-async def deactivate_user(
+@router.patch("/users/{user_id}/switch")
+async def switch_user_activation(
     user_id: UUID,
     current_user: dict = Depends(require_admin),
 ):
     if str(user_id) == current_user["id"]:
-        raise HTTPException(400, "Cannot deactivate yourself")
+        raise HTTPException(400, "Cannot change your own activation status.")
     pool = get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "UPDATE users SET is_active = FALSE WHERE id = %s RETURNING id",
+                "UPDATE users SET is_active = NOT is_active WHERE id = %s RETURNING id, is_active",
                 (str(user_id),),
             )
-            if not await cur.fetchone():
+            result = await cur.fetchone()
+            if not result:
                 raise HTTPException(404, "User not found")
-    return {"user_id": str(user_id), "status": "deactivated"}
+    return {"user_id": str(result[0]), "active" : result[1]}

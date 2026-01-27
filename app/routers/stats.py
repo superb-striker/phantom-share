@@ -13,7 +13,7 @@ async def get_stats():
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT COUNT(*) FROM secrets WHERE deleted_at IS NULL AND expires_at > NOW()"
+                "SELECT COUNT(*) FROM secrets WHERE expires_at > NOW()"
             )
             active = (await cur.fetchone())[0]
             await cur.execute("SELECT COUNT(*) FROM secrets")
