@@ -2,9 +2,9 @@
 permissions.py – Role-Based Access Control helpers.
 
 Roles (in ascending privilege order):
-  readonly  → can only retrieve secrets (no create/delete)
-  user      → full CRUD on own secrets
-  admin     → full access including /api/admin/* endpoints
+  readonly  -> can only retrieve secrets (no create/delete)
+  user      -> full CRUD on own secrets
+  admin     -> full access including /api/admin/* endpoints
 """
 from fastapi import Depends, HTTPException, status
 from app.core.security import get_current_user

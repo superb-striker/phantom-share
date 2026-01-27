@@ -13,13 +13,22 @@ _redis: aioredis.Redis | None = None
 
 async def init_redis() -> None:
     global _redis
-    _redis = aioredis.from_url(
+    client = aioredis.from_url(
         settings.REDIS_URL,
         encoding="utf-8",
         decode_responses=True,
     )
-    # Enable expired-key events on database 0
-    await _redis.config_set("notify-keyspace-events", "Ex")
+    try:
+        await client.config_set("notify-keyspace-events", "Ex")
+    except Exception as exc:
+        print(
+            f"[REDIS] Could not run CONFIG SET notify-keyspace-events (need Ex for expiry events): {exc}"
+        )
+        print(
+            "[REDIS] Fix: allow CONFIG on this Redis, or set notify-keyspace-events Ex in redis.conf. "
+            "Until then, only the DB fallback sweep deletes expired secrets."
+        )
+    _redis = client
 
 async def close_redis() -> None:
     if _redis:
