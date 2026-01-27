@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, AnyUrl, model_validator
 
 # Auth
 
@@ -44,20 +44,21 @@ class SecretCreate(BaseModel):
     # Notifications
     notify_on_view: bool = False
     notify_email: Optional[EmailStr] = None
-    webhook_url: Optional[str] = Field(default=None, max_length=512)
+    webhook_url: Optional[AnyUrl] = Field(default=None, max_length=512)
     # Client-side E2E: if True, `content` is already ciphertext (base64)
     # and `client_nonce` must be supplied. Server will NOT decrypt.
     client_encrypted: bool = False
     client_nonce: Optional[str] = None
-    @field_validator("access_password")
-    @classmethod
-    def password_required_if_protected(cls, v, info):
-        if info.data.get("password_protected") and not v:
+    @model_validator(mode="after")
+    def validate_password(self):
+        if self.password_protected and not self.access_password:
             raise ValueError("access_password is required when password_protected is True")
-        return v
+        if self.client_encrypted and not self.client_nonce:
+            raise ValueError("client_nonce is required when client_encrypted is True")
+        return self
 
 class SecretCreateResponse(BaseModel):
-    secret_id: str
+    secret_id: UUID
     share_url: str
     signed_token: str
     expires_at: datetime
@@ -86,7 +87,7 @@ class SecretInfo(BaseModel):
     max_views: int = 1
 
 class SecretListItem(BaseModel):
-    id: str
+    id: UUID
     created_at: datetime
     expires_at: datetime
     viewed: bool
@@ -115,7 +116,7 @@ class AuditLogItem(BaseModel):
     action: str
     actor_id: Optional[UUID]
     actor_ip: Optional[str]
-    secret_id: Optional[str]
+    secret_id: Optional[UUID]
     metadata: dict
     created_at: datetime
  
@@ -128,6 +129,6 @@ class AuditLogResponse(BaseModel):
  # Key management
  
 class KeyRotateResponse(BaseModel):
-    secret_id: str
+    secret_id: UUID
     new_key_version: int
     rotated_at: datetime
