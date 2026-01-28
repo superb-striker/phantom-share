@@ -1,7 +1,7 @@
 import hashlib
 import hmac
 import time
-from uuid import uuid4
+from uuid import UUID, uuid4
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -26,8 +26,8 @@ def hash_password(password: str) -> str:
 def verify_password(plain: str, hashed: str) -> bool:
     return bcrypt.checkpw(plain.encode(), hashed.encode())
 
-def sha256_password(password: str) -> str:
-    # Lightweight hash used only for secret access passwords (not user auth).
+def sha256_hash(password: str) -> str:
+    # Lightweight hash used only for secret access passwords/tokens (not user auth).
     return hashlib.sha256(password.encode()).hexdigest()
 
 
@@ -37,23 +37,25 @@ def sha256_password(password: str) -> str:
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
-def create_access_token(user_id: str, role: str) -> str:
-    # Used to authenticate for API endpoints
+def create_access_token(user_id: str, role: str, session_id: str) -> str:
+    # Used to authenticate for API endpoints. `sid` ties the JWT to a DB session row (revoked on logout).
     payload = {
         "sub": user_id,
         "role": role,
-        "jti": str(uuid4()), # 128-bit label used for unique identification, generated randomly or pseudo-randomly
+        "sid": session_id,
+        "jti": str(uuid4()),
         "exp": _utcnow() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES),
         "iat": _utcnow(),
         "type": "access", # distinguish access vs refresh
     }
     return jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
-def create_refresh_token(user_id: str) -> tuple[str, datetime]:
+def create_refresh_token(user_id: str, session_id: str) -> tuple[str, datetime]:
     # Used to get a new access token without logging in again
     expires_at = _utcnow() + timedelta(days=settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS)
     payload = {
         "sub": user_id,
+        "sid": session_id,
         "jti": str(uuid4()),
         "exp": expires_at,
         "iat": _utcnow(),
@@ -77,7 +79,7 @@ def decode_token(token: str) -> dict:
 
 
 # Signed share-link tokens
-def create_signed_token(secret_id: str, expires_in_hours: int) -> str:
+def create_signed_token(secret_id: UUID, expires_in_hours: int) -> str:
     """
     Returns a URL-safe signed token: <secret_id>.<ts>.<sig>
     No DB round-trip needed to validate.
@@ -125,16 +127,38 @@ async def get_current_user(
     payload = decode_token(credentials.credentials)
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Wrong token type")
+    sub = payload.get("sub")
+    sid = payload.get("sid")
+    if not sub or not isinstance(sub, str):
+        raise HTTPException(status_code=401, detail="Invalid user ID")
+    if not sid or not isinstance(sid, str):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     pool = get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, email, username, role, is_active FROM users WHERE id = %s",
-                (payload["sub"],),
+                """
+                SELECT u.id, u.email, u.username, u.role, u.is_active
+                FROM users u
+                INNER JOIN sessions s ON s.user_id = u.id
+                WHERE u.id = %s
+                  AND s.id = %s
+                  AND s.revoked = FALSE
+                  AND s.expires_at > NOW()
+                """,
+                (sub, sid),
             )
             row = await cur.fetchone()
     if not row or not row[4]:  # is_active
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+        raise HTTPException(
+            status_code=401,
+            detail="Session revoked, expired, or user inactive",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     return {"id": str(row[0]), "email": row[1], "username": row[2], "role": row[3]}
 
 # For public routes (optional login)
