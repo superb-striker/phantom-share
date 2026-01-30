@@ -42,8 +42,11 @@ async def notify_secret_viewed(
     </body></html>
     """
     tasks = []
-    if notify_email and settings.SMTP_USERNAME:
-        tasks.append(asyncio.to_thread(_send_smtp, notify_email, subject, body))
+    if notify_email:
+        if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:
+            print(f"[NOTIFY] Skipping email to {notify_email} - SMTP_USERNAME/SMTP_PASSWORD not configured")
+        else:
+            tasks.append(asyncio.to_thread(_send_smtp, notify_email, subject, body))
     if webhook_url:
         tasks.append(
             _fire_webhook(
