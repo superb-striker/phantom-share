@@ -24,6 +24,7 @@ from app.core.security import (
     sha256_hash,
     verify_signed_token,
 )
+from app.core.rate_limit import limiter
 from app.helper import (
     decrypt_content,
     encrypt_content,
@@ -48,7 +49,7 @@ router = APIRouter(prefix="/api/secrets", tags=["secrets"])
 
 
 # Create
-@router.post("", response_model=SecretCreateResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=SecretCreateResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limiter(30, 60, scope="secret_create"))])
 async def create_secret(
     body: SecretCreate,
     request: Request,
@@ -146,7 +147,7 @@ async def _insert_secret(conn, content, nonce, body, owner_id) -> str:
     return str(row[0])
 
 # Retrieve & burn
-@router.post("/{secret_id}", response_model=SecretContent)
+@router.post("/{secret_id}", response_model=SecretContent, dependencies=[Depends(limiter(10, 60, scope="secret_retrieve"))])
 async def get_secret(
     secret_id: str,
     body: SecretRetrieve,
@@ -261,7 +262,7 @@ async def get_secret(
     )
 
 # View secret through share_url
-@router.get("/{secret_id}", response_model=SecretContent)
+@router.get("/{secret_id}", response_model=SecretContent, dependencies=[Depends(limiter(10, 60, scope="secret_retrieve"))])
 async def get_secret_browser(
     secret_id: str,
     request: Request,
@@ -484,7 +485,7 @@ async def delete_secret(
                     raise HTTPException(404, "Secret not found")
 
 # Key rotation
-@router.post("/{secret_id}/rotate-key", response_model=KeyRotateResponse)
+@router.post("/{secret_id}/rotate-key", response_model=KeyRotateResponse, dependencies=[Depends(limiter(5, 60, scope="rotate_key"))])
 async def rotate_secret_key(
     secret_id: str,
     request: Request,

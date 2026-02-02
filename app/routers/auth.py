@@ -22,13 +22,14 @@ from app.core.security import (
     sha256_hash
 )
 from app.core.config import get_settings
+from app.core.rate_limit import limiter
 from app.schemas import RefreshRequest, TokenResponse, UserLogin, UserRegister, UserResponse
 from app.services import audit_service
 
 settings = get_settings()
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limiter(3, 3600, scope="register"))])
 async def register(body: UserRegister, request: Request):
     pool = get_pool()
     pw_hash = hash_password(body.password)
@@ -60,7 +61,7 @@ async def register(body: UserRegister, request: Request):
         role=row[3], is_active=row[4], created_at=row[5],
     )
 
-@router.post("/login", response_model=TokenResponse)
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(limiter(5, 60, scope="login"))])
 async def login(body: UserLogin, request: Request):
     pool = get_pool()
     async with pool.connection() as conn:
@@ -102,7 +103,7 @@ async def login(body: UserLogin, request: Request):
         expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(limiter(10, 60, scope="refresh"))])
 async def refresh_token_endpoint(body: RefreshRequest, request: Request):
     payload = decode_token(body.refresh_token)
     if payload.get("type") != "refresh":
