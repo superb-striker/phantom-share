@@ -1,6 +1,6 @@
 # 👻 Phantom Share
 
-A production-style backend system for securely sharing secrets - featuring envelope encryption with zero plaintext persistence, real-time destruction via distributed expiry coordination, async RabbitMQ notifications, atomic Redis rate limiting, and a Go CLI for developer-friendly access.
+A production-style backend system with CLI support for securely sharing secrets - featuring envelope encryption with zero plaintext persistence, real-time destruction via distributed expiry coordination, async RabbitMQ notifications, atomic Redis rate limiting, and a Go CLI for developer-friendly access.
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-green?logo=fastapi)
