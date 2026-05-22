@@ -1,12 +1,12 @@
 from functools import lru_cache
-from typing import List
+from typing import List, ClassVar
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
     # App
     APP_NAME: str = "Phantom Share"
-    APP_VERSION: str = "2.0.0"
+    APP_VERSION: str = "2.1.0"
     DEBUG: bool = False
 
     # Database 
@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     
     # Encryption 
+    CHACHA_KEY_BYTES : ClassVar[int] = 32
+
     # Master Key Encryption Key – base64-encoded 32-byte secret.
     # Generate with: python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"
     SECRET_ENCRYPTION_KEY: str = "generate-and-replace"         
@@ -49,6 +51,9 @@ class Settings(BaseSettings):
     '''
     SMTP_PASSWORD: str = "generate-and-replace-smtp"  
     SMTP_FROM: str = "name@gmail.com"
+    
+    # RabbitMQ for email/webhook delivery
+    RABBITMQ_URL : str ="amqp://guest:guest@localhost:5672/"
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:5173"]
