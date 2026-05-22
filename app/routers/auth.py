@@ -8,7 +8,7 @@ routers/auth.py – /api/auth/* endpoints.
   GET  /api/auth/me         – current user info
 """
 
-from uuid import uuid4
+from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.database import get_pool
@@ -23,14 +23,21 @@ from app.core.security import (
 )
 from app.core.config import get_settings
 from app.core.rate_limit import limiter
-from app.schemas import RefreshRequest, TokenResponse, UserLogin, UserRegister, UserResponse
+from app.schemas import RefreshRequest, TokenResponse, LoginRequest, RegisterRequest, UserResponse
 from app.services import audit_service
 
 settings = get_settings()
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limiter(3, 3600, scope="register"))])
-async def register(body: UserRegister, request: Request):
+@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(limiter(10, 3600, scope="register", force_ip=True))])
+async def register(body: RegisterRequest, request: Request):
+    '''
+    Create a new user account and return the created user profile.
+
+    Raises:
+        HTTPException: 409 if the email or username already exists.
+        HTTPException: 500 if user creation fails.
+    '''
     pool = get_pool()
     pw_hash = hash_password(body.password)
     async with pool.connection() as conn:
@@ -41,7 +48,7 @@ async def register(body: UserRegister, request: Request):
                 (body.email, body.username),
             )
             if await cur.fetchone():
-                raise HTTPException(status_code=409, detail="Email or username already taken")
+                raise HTTPException(status.HTTP_409_CONFLICT, detail="Email or username already taken")
             await cur.execute(
                 """
                 INSERT INTO users (email, username, password_hash)
@@ -51,9 +58,11 @@ async def register(body: UserRegister, request: Request):
                 (body.email, body.username, pw_hash),
             )
             row = await cur.fetchone()
+    if row is None:
+        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="User creation failed.")
     await audit_service.log(
         "user_registered",
-        actor_id=str(row[0]),
+        actor_id=row[0],
         actor_ip=request.state.client_ip,
     )
     return UserResponse(
@@ -61,8 +70,19 @@ async def register(body: UserRegister, request: Request):
         role=row[3], is_active=row[4], created_at=row[5],
     )
 
-@router.post("/login", response_model=TokenResponse, dependencies=[Depends(limiter(5, 60, scope="login"))])
-async def login(body: UserLogin, request: Request):
+@router.post("/login", response_model=TokenResponse, dependencies=[Depends(limiter(20, 60, scope="login"))])
+async def login(body: LoginRequest, request: Request):
+    '''
+    Authenticate a user and issue JWT access and refresh tokens.
+
+    Validates user credentials, checks account status, creates a
+    new session, stores the hashed refresh token, and logs the
+    login event.
+
+    Raises:
+        HTTPException: 401 if credentials are invalid.
+        HTTPException: 403 if the account is deactivated.
+    '''
     pool = get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -72,10 +92,10 @@ async def login(body: UserLogin, request: Request):
             )
             row = await cur.fetchone()
         if not row or not verify_password(body.password, row[1]):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
         if not row[3]:  # is_active
-            raise HTTPException(status_code=403, detail="Account is deactivated")
-        user_id, _, role, _ = str(row[0]), row[1], row[2], row[3]
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="Account is deactivated")
+        user_id, role = str(row[0]), row[2]
         session_id = str(uuid4())
         access_token = create_access_token(user_id, role, session_id)
         refresh_token, expires_at = create_refresh_token(user_id, session_id)
@@ -96,18 +116,25 @@ async def login(body: UserLogin, request: Request):
                     expires_at,
                 ),
             )
-    await audit_service.log("user_login", actor_id=user_id, actor_ip=request.state.client_ip)
+    await audit_service.log("user_login", actor_id=UUID(user_id), actor_ip=request.state.client_ip)
     return TokenResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES * 60,
     )
 
-@router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(limiter(10, 60, scope="refresh"))])
+@router.post("/refresh", response_model=TokenResponse, dependencies=[Depends(limiter(60, 60, scope="refresh"))])
 async def refresh_token_endpoint(body: RefreshRequest, request: Request):
+    """
+    Exchange a valid refresh token for a new access + refresh token pair.
+    Old refresh token is revoked atomically (rotation).
+ 
+    Raises:
+        401 – token type mismatch, invalid, revoked, or expired.
+    """
     payload = decode_token(body.refresh_token)
     if payload.get("type") != "refresh":
-        raise HTTPException(status_code=401, detail="Wrong token type")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Wrong token type")
     pool = get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -125,7 +152,7 @@ async def refresh_token_endpoint(body: RefreshRequest, request: Request):
             )
             row = await cur.fetchone()
         if not row:
-            raise HTTPException(status_code=401, detail="Refresh token invalid or expired")
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Refresh token invalid or expired")
         user_id, role = str(row[0]), row[1]
         new_session_id = str(uuid4())
         new_access = create_access_token(user_id, role, new_session_id)
@@ -151,6 +178,11 @@ async def refresh_token_endpoint(body: RefreshRequest, request: Request):
                     new_expires,
                 ),
             )
+    await audit_service.log(
+        "token_refresh",
+        actor_id=UUID(user_id),
+        actor_ip=request.state.client_ip,
+    )
     return TokenResponse(
         access_token=new_access,
         refresh_token=new_refresh,
@@ -159,13 +191,20 @@ async def refresh_token_endpoint(body: RefreshRequest, request: Request):
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(body: RefreshRequest, current_user: dict = Depends(get_current_user)):
+    """
+    Revoke the supplied refresh token.
+    The session row is deleted automatically by the DB trigger once revoked=TRUE.
+ 
+    Raises:
+        401 – wrong token type, missing subject, or session not found / already revoked.
+    """
     payload = decode_token(body.refresh_token)
     if payload.get("type") != "refresh":
-        raise HTTPException(status_code=401, detail="Wrong token type")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Wrong token type")
     sub = payload.get("sub")
     sid = payload.get("sid")
     if not sub or not isinstance(sub, str):
-        raise HTTPException(status_code=401, detail="Invalid token subject")
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
     h = sha256_hash(body.refresh_token)
     pool = get_pool()
     async with pool.connection() as conn:
@@ -188,10 +227,10 @@ async def logout(body: RefreshRequest, current_user: dict = Depends(get_current_
                 )
             if cur.rowcount == 0:
                 raise HTTPException(
-                    status_code=401,
+                    status.HTTP_401_UNAUTHORIZED,
                     detail="Session not found, already revoked, or refresh token was rotated",
                 )
-    await audit_service.log("user_logout", actor_id=sub)
+    await audit_service.log("user_logout", actor_id=UUID(sub), actor_ip=None)
 
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
@@ -204,7 +243,7 @@ async def me(current_user: dict = Depends(get_current_user)):
             )
             row = await cur.fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="User not found.")
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found.")
     return UserResponse(
         id=row[0], email=row[1], username=row[2],
         role=row[3], is_active=row[4], created_at=row[5],
