@@ -11,8 +11,9 @@ async def init_pool() -> None:
         settings.DATABASE_URL,
         min_size=settings.DB_MIN_POOL,
         max_size=settings.DB_MAX_POOL,
-        open=True,
+        open=False,
     )
+    await pool.open()
  
 async def close_pool() -> None:
     if pool:
