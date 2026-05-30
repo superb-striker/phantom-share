@@ -18,6 +18,7 @@ Distributed locking (multi-instance safety):
     entirely — no duplicate deletions, no race on bulk cleanup.
 """
 import asyncio
+from datetime import datetime, timezone
 import uuid
 
 from app.core.database import get_pool
@@ -106,7 +107,7 @@ async def delete_secret(secret_id: str) -> None:
         await release_lock(lock_key, token)
 
 
-async def fallback_sweep() -> int:
+async def fallback_sweep() -> dict:
     """
     Hard-delete expired / fully-viewed secrets, inactive users, and stale
     sessions. Returns total count of deleted rows.
@@ -119,7 +120,12 @@ async def fallback_sweep() -> int:
     token = await acquire_lock(REDIS_SWEEP_LOCK, SWEEP_LOCK_TTL)
     if token is None:
         print("[CLEANUP] Sweep lock held by another instance - skipping this cycle")
-        return 0
+        return {
+            "secrets_deleted":  0,
+            "sessions_deleted": 0,
+            "users_deleted":    0,
+            "ran_at":           datetime.now(timezone.utc),
+        }
     try:
         pool = get_pool()
         async with pool.connection() as conn:
@@ -150,7 +156,7 @@ async def fallback_sweep() -> int:
                     RETURNING id
                     """
                 )
-                deleted_sessions = len(await cur.fetchall())
+                deleted_sessions = await cur.fetchall()
         # Log per secret so secret_id is captured individually
         for secret_id in deleted_secrets:
             await audit_service.log(
@@ -165,8 +171,12 @@ async def fallback_sweep() -> int:
                 actor_id=user_id,
                 metadata={"reason": "user_inactive", "source": "fallback_sweep"},
             )
-        total = len(deleted_secrets) + len(deleted_users) + deleted_sessions
-        return total
+        return {
+            "secrets_deleted":  len(deleted_secrets),
+            "sessions_deleted": len(deleted_sessions),
+            "users_deleted":    len(deleted_users),
+            "ran_at":           datetime.now(timezone.utc),
+        }
     finally:
         await release_lock(REDIS_SWEEP_LOCK, token)
 

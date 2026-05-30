@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 from psycopg import sql
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, responses
 
 from app.core.config import get_settings
 from app.core.database import get_pool
@@ -362,7 +362,7 @@ async def list_secrets(
             await cur.execute(
                 sql.SQL("""
                     SELECT id, created_at, expires_at, viewed, view_count,
-                           max_views, password_protected, notify_on_view,
+                           max_views, password_protected, notify_on_view
                     FROM secrets
                     WHERE {}
                     ORDER BY created_at DESC
@@ -458,3 +458,30 @@ async def rotate_secret_key(
         new_key_version=new_version,
         rotated_at=now,
     )
+    
+@router.get("/view/{secret_id}", response_class=responses.HTMLResponse)
+async def secret_view_page(secret_id: str, token: Optional[str] = Query(default=None)):
+    token_param = f"&token={token}" if token else ""
+    html = f"""<!DOCTYPE html>
+<html>
+<head><title>Phantom – Secret</title></head>
+<body>
+<script>
+  const password = prompt("This secret is password-protected.\\nEnter the password to reveal it:");
+  if (password === null) {{
+    document.write("<p>Cancelled.</p>");
+  }} else {{
+    fetch("/api/secrets/{secret_id}?access_password=" + encodeURIComponent(password) + "{token_param}")
+      .then(r => r.json())
+      .then(data => {{
+        if (data.detail) {{
+          document.write("<p>" + data.detail + "</p>");
+        }} else {{
+          document.write("<pre style='font-size:1.2em;padding:2em'>" + data.content + "</pre>");
+        }}
+      }});
+  }}
+</script>
+</body>
+</html>"""
+    return responses.HTMLResponse(content=html)
