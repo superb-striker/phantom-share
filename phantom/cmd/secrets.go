@@ -11,12 +11,10 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/phantom-share/phantom/internal/api"
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/api"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
-
-// ── share ─────────────────────────────────────────────────────────────────────
 
 var shareCmd = &cobra.Command{
 	Use:   "share [secret]",
@@ -101,8 +99,6 @@ Auth is optional – unauthenticated secrets are still encrypted.`,
 	},
 }
 
-// ── get ───────────────────────────────────────────────────────────────────────
-
 var getCmd = &cobra.Command{
 	Use:   "get <share-url>",
 	Short: "Retrieve and burn a secret",
@@ -147,7 +143,6 @@ var getCmd = &cobra.Command{
 	},
 }
 
-// ── info ──────────────────────────────────────────────────────────────────────
 
 var infoCmd = &cobra.Command{
 	Use:     "info <share-url>",
@@ -179,7 +174,6 @@ var infoCmd = &cobra.Command{
 	},
 }
 
-// ── list ──────────────────────────────────────────────────────────────────────
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -241,7 +235,6 @@ var listCmd = &cobra.Command{
 	},
 }
 
-// ── delete ────────────────────────────────────────────────────────────────────
 
 var deleteCmd = &cobra.Command{
 	Use:     "delete <share-url>",
@@ -262,30 +255,29 @@ var deleteCmd = &cobra.Command{
 	},
 }
 
-// ── rotate-key ────────────────────────────────────────────────────────────────
 
-var rotateKeyCmd = &cobra.Command{
-	Use:   "rotate-key <share-url>",
-	Short: "Rotate the server-side encryption key for a secret",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if err := config.RequireAuth(); err != nil {
-			return err
-		}
-		secretID, _ := parseShareURL(args[0])
-		client := api.New(config.BaseURL(), config.AccessToken())
-		resp, err := client.RotateKey(secretID)
-		if err != nil {
-			return err
-		}
-		output.Header("Encryption key rotated")
-		output.Field("Secret ID", resp.SecretID)
-		output.Field("New key version", strconv.Itoa(resp.NewKeyVersion))
-		output.Field("Rotated at", output.FormatTime(resp.RotatedAt))
-		fmt.Println()
-		return nil
-	},
-}
+// var rotateKeyCmd = &cobra.Command{
+// 	Use:   "rotate-key <share-url>",
+// 	Short: "Rotate the server-side encryption key for a secret",
+// 	Args:  cobra.ExactArgs(1),
+// 	RunE: func(cmd *cobra.Command, args []string) error {
+// 		if err := config.RequireAuth(); err != nil {
+// 			return err
+// 		}
+// 		secretID, _ := parseShareURL(args[0])
+// 		client := api.New(config.BaseURL(), config.AccessToken())
+// 		resp, err := client.RotateKey(secretID)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		output.Header("Encryption key rotated")
+// 		output.Field("Secret ID", resp.SecretID)
+// 		output.Field("New key version", strconv.Itoa(resp.NewKeyVersion))
+// 		output.Field("Rotated at", output.FormatTime(resp.RotatedAt))
+// 		fmt.Println()
+// 		return nil
+// 	},
+// }
 
 func init() {
 	// share flags
@@ -308,7 +300,6 @@ func init() {
 	listCmd.Flags().Bool("expired", false, "Filter: only expired secrets")
 }
 
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 // parseShareURL extracts (secretID, token) from a full share URL or bare UUID.
 func parseShareURL(raw string) (secretID, token string) {

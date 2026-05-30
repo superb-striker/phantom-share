@@ -1,4 +1,4 @@
-module github.com/phantom-share/phantom
+module github.com/superb-striker/phantom-share/phantom
 
 go 1.22
 

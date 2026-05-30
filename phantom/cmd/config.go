@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var configCmd = &cobra.Command{
@@ -43,7 +43,12 @@ var configSetURLCmd = &cobra.Command{
 	Short: "Set the API base URL",
 	Example: `  phantom config set-url https://phantom.mycompany.com
   phantom config set-url http://localhost:8000`,
-	Args: cobra.ExactArgs(1),
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("please provide a URL, e.g. 'phantom config set-url https://example.com'")
+		}
+		return nil
+    },	
 	RunE: func(cmd *cobra.Command, args []string) error {
 		viper.Set(config.KeyBaseURL, args[0])
 		if err := config.Save(); err != nil {
@@ -80,7 +85,9 @@ var configSetSMTPCmd = &cobra.Command{
 		if from != "" {
 			viper.Set("smtp.from", from)
 		}
-
+		if user == "" || pass == ""{
+			return fmt.Errorf("missing required flags: --user, --password")
+		}
 		if err := config.Save(); err != nil {
 			return err
 		}
@@ -94,7 +101,7 @@ var configSetSMTPCmd = &cobra.Command{
 }
 
 func init() {
-	configSetSMTPCmd.Flags().String("host", "", "SMTP host (e.g. smtp.gmail.com)")
+	configSetSMTPCmd.Flags().String("host", "smtp.gmail.com", "SMTP host (e.g. smtp.gmail.com)")
 	configSetSMTPCmd.Flags().String("port", "587", "SMTP port")
 	configSetSMTPCmd.Flags().String("user", "", "SMTP username")
 	configSetSMTPCmd.Flags().String("password", "", "SMTP password")

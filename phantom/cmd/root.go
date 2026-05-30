@@ -1,19 +1,19 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "phantom",
-	Short: "Phantom – secure, burn-after-reading secret sharing",
-	Long:  `Phantom is a CLI for creating and retrieving time-limited, encrypted secrets.`,
+	Short: "Phantom - secure secret sharing",
+	Long:  `Phantom is a CLI written in Go for creating and sharing time-limited, view-limited, encrypted secrets.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		return config.Init()
 	},
@@ -34,7 +34,7 @@ func init() {
 
 	cobra.OnInitialize(func() {
 		if u, _ := rootCmd.Flags().GetString("url"); u != "" {
-			fmt.Println(u) // viper picks it up via flag binding in Init
+			viper.BindPFlag("base_url", rootCmd.Flags().Lookup("url")) // viper picks it up via flag binding in Init
 		}
 	})
 
@@ -49,7 +49,7 @@ func init() {
 		auditCmd,
 		statsCmd,
 		healthCmd,
-		rotateKeyCmd,
+		// rotateKeyCmd,
 		adminCmd,
 		configCmd,
 		versionCmd,

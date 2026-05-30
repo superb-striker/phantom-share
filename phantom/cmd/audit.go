@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/phantom-share/phantom/internal/api"
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/api"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var auditCmd = &cobra.Command{
@@ -28,6 +28,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 		pageSize, _ := cmd.Flags().GetInt("page-size")
 		action, _ := cmd.Flags().GetString("action")
 		actorID, _ := cmd.Flags().GetString("actor-id")
+		severity, _ := cmd.Flags().GetString("severity")
 
 		// Derive secretID from positional arg (share URL or bare UUID)
 		secretID := ""
@@ -36,7 +37,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 		}
 
 		client := api.New(config.BaseURL(), config.AccessToken())
-		resp, err := client.AuditLogs(page, pageSize, action, actorID, secretID)
+		resp, err := client.AuditLogs(page, pageSize, action, severity, actorID, secretID)
 		if err != nil {
 			return err
 		}

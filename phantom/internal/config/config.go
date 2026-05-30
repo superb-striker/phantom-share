@@ -17,7 +17,7 @@ const (
 	KeyEmail        = "email"
 )
 
-// Init sets up Viper to read from ~/.phantom/config.yaml.
+// Sets up Viper to read from ~/.phantom/config.yaml.
 // Call once from the root PersistentPreRun.
 func Init() error {
 	home, err := os.UserHomeDir()
@@ -50,7 +50,7 @@ func Init() error {
 	return nil
 }
 
-// Save persists all viper values to disk.
+// Saves all viper values to disk.
 func Save() error {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -60,7 +60,7 @@ func Save() error {
 	return viper.WriteConfigAs(cfgPath)
 }
 
-// SetCredentials saves tokens + user info and writes to disk.
+// Saves tokens + user info and writes to disk.
 func SetCredentials(accessToken, refreshToken, username, email string) error {
 	viper.Set(KeyAccessToken, accessToken)
 	viper.Set(KeyRefreshToken, refreshToken)
@@ -69,7 +69,7 @@ func SetCredentials(accessToken, refreshToken, username, email string) error {
 	return Save()
 }
 
-// ClearCredentials removes auth tokens but keeps base_url.
+// Removes auth tokens but keeps base_url.
 func ClearCredentials() error {
 	viper.Set(KeyAccessToken, "")
 	viper.Set(KeyRefreshToken, "")
@@ -78,10 +78,10 @@ func ClearCredentials() error {
 	return Save()
 }
 
-// RequireAuth returns an error if the user is not logged in.
+// Returns an error if the user is not logged in.
 func RequireAuth() error {
 	if viper.GetString(KeyAccessToken) == "" {
-		return errors.New("not logged in – run: phantom auth login")
+		return errors.New("not logged in – run: phantom auth login or phantom auth register")
 	}
 	return nil
 }

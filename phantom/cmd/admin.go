@@ -7,9 +7,9 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/phantom-share/phantom/internal/api"
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/api"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var adminCmd = &cobra.Command{
@@ -17,7 +17,6 @@ var adminCmd = &cobra.Command{
 	Short: "Admin-only operations (requires admin role)",
 }
 
-// ── admin users ───────────────────────────────────────────────────────────────
 
 var adminUsersCmd = &cobra.Command{
 	Use:   "users",
@@ -45,14 +44,19 @@ var adminUsersCmd = &cobra.Command{
 			return nil
 		}
 
-		t := output.NewTable(os.Stdout, []string{"ID", "USERNAME", "EMAIL", "ROLE", "STATUS", "CREATED"})
+		t := output.NewTable(os.Stdout, []string{"ID", "USERNAME", "EMAIL", "ROLE", "STATUS", "DELETE AFTER", "CREATED"})
 		for _, u := range resp.Items {
+			deleteAfter := "—"
+			if u.DeleteAfter != nil {
+				deleteAfter = output.FormatTime(*u.DeleteAfter)
+			}
 			t.Append([]string{
 				u.ID[:8] + "…",
 				u.Username,
 				u.Email,
 				output.RoleColor(u.Role),
 				output.ActiveColor(u.IsActive),
+				deleteAfter,
 				output.FormatTime(u.CreatedAt),
 			})
 		}
@@ -62,8 +66,6 @@ var adminUsersCmd = &cobra.Command{
 	},
 }
 
-// ── admin cleanup ─────────────────────────────────────────────────────────────
-
 var adminCleanupCmd = &cobra.Command{
 	Use:   "cleanup",
 	Short: "Hard-purge all expired secrets from the database",
@@ -72,16 +74,19 @@ var adminCleanupCmd = &cobra.Command{
 			return err
 		}
 		client := api.New(config.BaseURL(), config.AccessToken())
-		count, err := client.AdminCleanup()
+		result, err := client.AdminCleanup()
 		if err != nil {
 			return err
 		}
-		output.Success("Purged %d expired secret(s).", count)
+		output.Success("Cleanup complete.")
+		output.Field("Secrets deleted", fmt.Sprintf("%d", result.SecretsDeleted))
+		output.Field("Sessions deleted", fmt.Sprintf("%d", result.SessionsDeleted))
+		output.Field("Users deleted", fmt.Sprintf("%d", result.UsersDeleted))
+		output.Field("Ran at", output.FormatTime(result.RanAt))
+		fmt.Println()
 		return nil
 	},
 }
-
-// ── admin role ────────────────────────────────────────────────────────────────
 
 var adminRoleCmd = &cobra.Command{
 	Use:   "role <user-id> <role>",
@@ -100,15 +105,17 @@ var adminRoleCmd = &cobra.Command{
 		}
 
 		client := api.New(config.BaseURL(), config.AccessToken())
-		if err := client.ChangeRole(userID, role); err != nil {
+		updated, err := client.ChangeRole(userID, role)
+		if err != nil {
 			return err
 		}
-		output.Success("User %s role changed to %s.", userID[:8]+"…", output.RoleColor(role))
+		output.Success("Role updated.")
+		output.Field("User", updated.Username+" ("+updated.Email+")")
+		output.Field("New role", output.RoleColor(updated.Role))
+		fmt.Println()
 		return nil
 	},
 }
-
-// ── admin toggle ──────────────────────────────────────────────────────────────
 
 var adminToggleCmd = &cobra.Command{
 	Use:   "toggle <user-id>",
@@ -121,14 +128,17 @@ var adminToggleCmd = &cobra.Command{
 		}
 		userID := args[0]
 		client := api.New(config.BaseURL(), config.AccessToken())
-		active, err := client.ToggleActivation(userID)
+		result, err := client.ToggleActivation(userID)
 		if err != nil {
 			return err
 		}
-		if active {
+		if result.IsActive {
 			output.Success("User %s is now %s.", userID[:8]+"…", color.GreenString("active"))
 		} else {
 			output.Warn("User %s is now %s.", userID[:8]+"…", color.RedString("inactive"))
+			if result.DeleteAfter != nil {
+				output.Field("Scheduled deletion", output.FormatTime(*result.DeleteAfter))
+			}
 		}
 		return nil
 	},

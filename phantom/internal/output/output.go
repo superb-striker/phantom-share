@@ -21,24 +21,19 @@ var (
 )
 
 func Success(format string, a ...any) {
-	successColor.Fprintf(os.Stdout, "✓ "+format+"\n", a...)
+	successColor.Fprintf(os.Stdout, "Success: "+format+"\n", a...)
 }
 
 func Info(format string, a ...any) {
-	infoColor.Fprintf(os.Stdout, "• "+format+"\n", a...)
+	infoColor.Fprintf(os.Stdout, "Info: "+format+"\n", a...)
 }
 
 func Warn(format string, a ...any) {
-	warnColor.Fprintf(os.Stdout, "⚠ "+format+"\n", a...)
+	warnColor.Fprintf(os.Stdout, "Warning: "+format+"\n", a...)
 }
 
 func Error(format string, a ...any) {
-	errorColor.Fprintf(os.Stderr, "✗ "+format+"\n", a...)
-}
-
-func Fatal(format string, a ...any) {
-	Error(format, a...)
-	os.Exit(1)
+	errorColor.Fprintf(os.Stderr, "Error: "+format+"\n", a...)
 }
 
 func Header(title string) {
@@ -78,10 +73,10 @@ func Banner() {
   ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║
   ██║     ██║  ██║██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║
   ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝`)
-	dimColor.Println("  Secure, burn-after-reading secret sharing")
+	dimColor.Println("Secure secret sharing")
 }
 
-// NewTable creates a styled tablewriter table writing to w.
+// Creates a styled tablewriter table writing to w.
 func NewTable(w io.Writer, headers []string) *tablewriter.Table {
 	t := tablewriter.NewWriter(w)
 	t.SetHeader(headers)
@@ -92,20 +87,14 @@ func NewTable(w io.Writer, headers []string) *tablewriter.Table {
 	t.SetAlignment(tablewriter.ALIGN_LEFT)
 	t.SetTablePadding("  ")
 	t.SetNoWhiteSpace(false)
-	t.SetHeaderColor(
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-		tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor},
-	)
+	colors := make([]tablewriter.Colors, len(headers))
+	for i := range colors {
+		colors[i] = tablewriter.Colors{tablewriter.Bold, tablewriter.FgHiCyanColor}
+	}
+	t.SetHeaderColor(colors...)	
 	return t
 }
 
-// ── formatting helpers ────────────────────────────────────────────────────────
 
 func FormatTime(t time.Time) string {
 	return t.Local().Format("2006-01-02 15:04:05")
@@ -138,9 +127,9 @@ func BoolIcon(b bool) string {
 
 func StatusIcon(viewed bool) string {
 	if viewed {
-		return color.RedString("burned 🔥")
+		return color.RedString("BURNED")
 	}
-	return color.GreenString("active ✓")
+	return color.GreenString("ACTIVE")
 }
 
 func RoleColor(role string) string {

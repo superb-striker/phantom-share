@@ -8,8 +8,8 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var pingCmd = &cobra.Command{
@@ -19,7 +19,8 @@ var pingCmd = &cobra.Command{
 Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.`,
 	Example: `  phantom ping "https://..." --to alice@example.com
   phantom ping "https://..." --to alice@example.com --from me@example.com --subject "Your credentials"
-  phantom ping "https://..." --to alice@example.com --message "Here's the DB password we discussed"`,
+  phantom ping "https://..." --to alice@example.com --message "Here's the DB password we discussed"
+  phantom ping "https://..." --to alice@example.com --password "hunter2"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		shareURL := args[0]
@@ -28,6 +29,7 @@ Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.
 		from, _ := cmd.Flags().GetString("from")
 		subject, _ := cmd.Flags().GetString("subject")
 		message, _ := cmd.Flags().GetString("message")
+		password, _ := cmd.Flags().GetString("password")
 
 		if to == "" {
 			return fmt.Errorf("--to is required")
@@ -54,7 +56,9 @@ Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.
 			sender = from
 		}
 
-		body := buildPingEmail(from, to, subject, shareURL, message, sender)
+		viewURL := strings.Replace(shareURL, "/api/secrets/", "/api/secrets/view/", 1)
+
+		body := buildPingEmail(from, to, subject, viewURL, message, sender, password)
 
 		addr := smtpHost + ":" + smtpPort
 		var auth smtp.Auth
@@ -70,9 +74,14 @@ Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.
 		output.Field("To", to)
 		output.Field("From", from)
 		output.Field("Subject", subject)
-		output.Field("Share URL", shareURL)
+		output.Field("Share URL", viewURL)
 		fmt.Println()
 		output.Success("Email delivered via %s", addr)
+		if password != "" {
+			fmt.Println()
+			output.Field("🔒 Password", password)
+			fmt.Println("  The recipient will be prompted on the page — send them this separately.")
+		}
 		fmt.Println()
 		return nil
 	},
@@ -83,29 +92,35 @@ func init() {
 	pingCmd.Flags().String("from", "", "Sender address (falls back to smtp.from in config)")
 	pingCmd.Flags().StringP("subject", "s", "Someone shared a secret with you", "Email subject line")
 	pingCmd.Flags().StringP("message", "m", "", "Optional personal message to include in the email body")
+	pingCmd.Flags().StringP("password", "p", "", "Access password for the secret (recipient will be prompted on the page)")
 	pingCmd.MarkFlagRequired("to")
 }
 
-func buildPingEmail(from, to, subject, shareURL, message, sender string) string {
+func buildPingEmail(from, to, subject, shareURL, message, sender, password string) string {
 	var sb strings.Builder
-	sb.WriteString("From: ");sb.WriteString(from);sb.WriteString("\r\n")
-	sb.WriteString("To: ");sb.WriteString(to);sb.WriteString("\r\n")
-	sb.WriteString("Subject: ");sb.WriteString(subject);sb.WriteString("\r\n")
+	sb.WriteString("From: "); sb.WriteString(from); sb.WriteString("\r\n")
+	sb.WriteString("To: "); sb.WriteString(to); sb.WriteString("\r\n")
+	sb.WriteString("Subject: "); sb.WriteString(subject); sb.WriteString("\r\n")
 	sb.WriteString("MIME-Version: 1.0\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	sb.WriteString("\r\n")
 
 	if message != "" {
-		sb.WriteString(message);sb.WriteString("\r\n\r\n")
+		sb.WriteString(message); sb.WriteString("\r\n\r\n")
 	}
 
 	sb.WriteString("A secret has been shared with you via Phantom:\r\n\r\n")
-	sb.WriteString("  ");sb.WriteString(shareURL);sb.WriteString("\r\n\r\n")
+	sb.WriteString("  "); sb.WriteString(shareURL); sb.WriteString("\r\n\r\n")
 	sb.WriteString("⚠  This link is one-time use and will expire. Open it once to reveal the secret.\r\n")
 	sb.WriteString("   Once viewed, the secret is permanently destroyed.\r\n\r\n")
 
+	if password != "" {
+		sb.WriteString("🔒 This secret is password-protected.\r\n")
+		sb.WriteString("   You will be prompted to enter a password when you open the link.\r\n\r\n")
+	}
+
 	if sender != "" && sender != from {
-		sb.WriteString("Sent by: ");sb.WriteString(sender);sb.WriteString("\r\n\r\n")
+		sb.WriteString("Sent by: "); sb.WriteString(sender); sb.WriteString("\r\n\r\n")
 	}
 
 	sb.WriteString("─────────────────────────────────────────\r\n")

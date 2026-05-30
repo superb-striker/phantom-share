@@ -6,12 +6,11 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/phantom-share/phantom/internal/api"
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/api"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
-// ── stats ─────────────────────────────────────────────────────────────────────
 
 var statsCmd = &cobra.Command{
 	Use:   "stats",
@@ -36,7 +35,6 @@ var statsCmd = &cobra.Command{
 	},
 }
 
-// ── health ────────────────────────────────────────────────────────────────────
 
 var healthCmd = &cobra.Command{
 	Use:   "health",
@@ -62,14 +60,13 @@ var healthCmd = &cobra.Command{
 	},
 }
 
-// ── version ───────────────────────────────────────────────────────────────────
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print phantom CLI version",
 	Run: func(cmd *cobra.Command, args []string) {
 		output.Banner()
-		output.Field("CLI version", "1.0.0")
+		output.Field("CLI version", "2.0.0")
 		output.Field("API URL", config.BaseURL())
 		if u := config.Username(); u != "" {
 			output.Field("Logged in as", u)

@@ -221,25 +221,25 @@ GET /api/stats                             Active secrets, total created, total 
 
 ```bash
 cd phantom
-go build -o phantom .
+go build -o phantom.exe .
 
 # Register and log in
-./phantom auth register
-./phantom auth login
+phantom auth register
+phantom auth login
 
 # Work with secrets
-./phantom secrets create
-./phantom secrets list
-./phantom secrets get <id>
-./phantom secrets delete <id>
+phantom secrets create
+phantom secrets list
+phantom secrets get <id>
+phantom secrets delete <id>
 
 # Admin
-./phantom admin users
-./phantom admin audit-logs
+phantom admin users
+phantom admin audit-logs
 
 # Utilities
-./phantom ping
-./phantom stats
+phantom ping
+phantom stats
 ```
 
 The CLI persists your base URL and auth tokens locally so you don't need to pass them on every command.

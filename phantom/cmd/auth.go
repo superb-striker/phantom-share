@@ -10,9 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/phantom-share/phantom/internal/api"
-	"github.com/phantom-share/phantom/internal/config"
-	"github.com/phantom-share/phantom/internal/output"
+	"github.com/superb-striker/phantom-share/phantom/internal/api"
+	"github.com/superb-striker/phantom-share/phantom/internal/config"
+	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
 var authCmd = &cobra.Command{
@@ -20,14 +20,17 @@ var authCmd = &cobra.Command{
 	Short: "Authenticate with the Phantom API",
 }
 
-// ── login ─────────────────────────────────────────────────────────────────────
-
 var authLoginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Log in and save credentials to ~/.phantom/config.yaml",
 	Example: `  phantom auth login
   PHANTOM_BASE_URL=https://myserver.com phantom auth login`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		
+		if config.AccessToken() != "" {
+			return fmt.Errorf("already logged in as %s – run 'phantom auth logout' first", config.Username())
+		}
+
 		output.Header("Log in to Phantom")
 
 		email := prompt("Email")
@@ -61,12 +64,15 @@ var authLoginCmd = &cobra.Command{
 	},
 }
 
-// ── register ──────────────────────────────────────────────────────────────────
-
 var authRegisterCmd = &cobra.Command{
 	Use:   "register",
 	Short: "Create a new Phantom account",
 	RunE: func(cmd *cobra.Command, args []string) error {
+
+		if config.AccessToken() != "" {
+			return fmt.Errorf("already logged in as %s – run 'phantom auth logout' first", config.Username())
+		}
+
 		output.Header("Create a Phantom account")
 
 		email := prompt("Email")
@@ -91,8 +97,6 @@ var authRegisterCmd = &cobra.Command{
 		return nil
 	},
 }
-
-// ── logout ────────────────────────────────────────────────────────────────────
 
 var authLogoutCmd = &cobra.Command{
 	Use:   "logout",
@@ -119,8 +123,6 @@ var authLogoutCmd = &cobra.Command{
 		return nil
 	},
 }
-
-// ── whoami ────────────────────────────────────────────────────────────────────
 
 var authWhoamiCmd = &cobra.Command{
 	Use:     "whoami",
@@ -152,8 +154,8 @@ func init() {
 	authCmd.AddCommand(authLoginCmd, authRegisterCmd, authLogoutCmd, authWhoamiCmd)
 }
 
-// ── prompt helpers ────────────────────────────────────────────────────────────
 
+// TODO: Fix the Ctrl+C bug which breaks the prompt
 func prompt(label string) string {
 	fmt.Printf("  %s: ", label)
 	scanner := bufio.NewScanner(os.Stdin)

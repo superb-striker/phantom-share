@@ -26,7 +26,7 @@ func New(baseURL, accessToken string) *Client {
 	}
 }
 
-// ── internal request helper ──────────────────────────────────────────────────
+// internal request helper
 
 func (c *Client) do(method, path string, body any, out any) error {
 	var bodyReader io.Reader
@@ -78,7 +78,7 @@ func (c *Client) do(method, path string, body any, out any) error {
 	return nil
 }
 
-// ── response / request types ─────────────────────────────────────────────────
+// response / request types
 
 type TokenResponse struct {
 	AccessToken  string `json:"access_token"`
@@ -153,6 +153,7 @@ type SecretListResponse struct {
 type AuditLogItem struct {
 	ID        int            `json:"id"`
 	Action    string         `json:"action"`
+	Severity  string         `json:"severity"` // info | warning | critical
 	ActorID   *string        `json:"actor_id"`
 	ActorIP   *string        `json:"actor_ip"`
 	SecretID  *string        `json:"secret_id"`
@@ -179,14 +180,27 @@ type KeyRotateResponse struct {
 	RotatedAt     time.Time `json:"rotated_at"`
 }
 
-type UserListResponse struct {
-	Items    []UserResponse `json:"items"`
-	Total    int            `json:"total"`
-	Page     int            `json:"page"`
-	PageSize int            `json:"page_size"`
+// AdminUserResponse mirrors the richer /api/admin/users shape
+// (includes updated_at and delete_after, absent from UserResponse).
+type AdminUserResponse struct {
+	ID          string     `json:"id"`
+	Email       string     `json:"email"`
+	Username    string     `json:"username"`
+	Role        string     `json:"role"`
+	IsActive    bool       `json:"is_active"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	DeleteAfter *time.Time `json:"delete_after"`
 }
 
-// ── auth ─────────────────────────────────────────────────────────────────────
+type UserListResponse struct {
+	Items    []AdminUserResponse `json:"items"`
+	Total    int                 `json:"total"`
+	Page     int                 `json:"page"`
+	PageSize int                 `json:"page_size"`
+}
+
+// auth
 
 func (c *Client) Register(email, username, password string) (*UserResponse, error) {
 	var out UserResponse
@@ -216,7 +230,7 @@ func (c *Client) Me() (*UserResponse, error) {
 	return &out, err
 }
 
-// ── secrets ───────────────────────────────────────────────────────────────────
+// secrets
 
 func (c *Client) CreateSecret(req SecretCreateRequest) (*SecretCreateResponse, error) {
 	var out SecretCreateResponse
@@ -267,7 +281,7 @@ func (c *Client) RotateKey(secretID string) (*KeyRotateResponse, error) {
 	return &out, err
 }
 
-// ── stats ─────────────────────────────────────────────────────────────────────
+// stats
 
 func (c *Client) Stats() (*StatsResponse, error) {
 	var out StatsResponse
@@ -281,12 +295,15 @@ func (c *Client) Health() (map[string]string, error) {
 	return out, err
 }
 
-// ── admin ─────────────────────────────────────────────────────────────────────
+// admin
 
-func (c *Client) AuditLogs(page, pageSize int, action, actorID, secretID string) (*AuditLogResponse, error) {
+func (c *Client) AuditLogs(page, pageSize int, action, severity, actorID, secretID string) (*AuditLogResponse, error) {
 	q := fmt.Sprintf("?page=%d&page_size=%d", page, pageSize)
 	if action != "" {
 		q += "&action=" + url.QueryEscape(action)
+	}
+	if severity != "" {
+		q += "&severity=" + url.QueryEscape(severity)
 	}
 	if actorID != "" {
 		q += "&actor_id=" + url.QueryEscape(actorID)
@@ -299,12 +316,18 @@ func (c *Client) AuditLogs(page, pageSize int, action, actorID, secretID string)
 	return &out, err
 }
 
-func (c *Client) AdminCleanup() (int, error) {
-	var out struct {
-		DeletedCount int `json:"deleted_count"`
-	}
+// CleanupResponse matches the new CleanupResponse schema.
+type CleanupResponse struct {
+	SecretsDeleted  int       `json:"secrets_deleted"`
+	SessionsDeleted int       `json:"sessions_deleted"`
+	UsersDeleted    int       `json:"users_deleted"`
+	RanAt           time.Time `json:"ran_at"`
+}
+
+func (c *Client) AdminCleanup() (*CleanupResponse, error) {
+	var out CleanupResponse
 	err := c.do("DELETE", "/api/admin/cleanup", nil, &out)
-	return out.DeletedCount, err
+	return &out, err
 }
 
 func (c *Client) ListUsers(page, pageSize int) (*UserListResponse, error) {
@@ -313,14 +336,21 @@ func (c *Client) ListUsers(page, pageSize int) (*UserListResponse, error) {
 	return &out, err
 }
 
-func (c *Client) ChangeRole(userID, role string) error {
-	return c.do("PATCH", fmt.Sprintf("/api/admin/users/%s/role?role=%s", userID, url.QueryEscape(role)), nil, nil)
+func (c *Client) ChangeRole(userID, role string) (*AdminUserResponse, error) {
+	var out AdminUserResponse
+	err := c.do("PATCH", "/api/admin/users/"+userID+"/role", map[string]string{"role": role}, &out)
+	return &out, err
 }
 
-func (c *Client) ToggleActivation(userID string) (bool, error) {
-	var out struct {
-		Active bool `json:"active"`
-	}
+// UserStatusResponse mirrors the UserStatusResponse schema from the server.
+type UserStatusResponse struct {
+	UserID      string     `json:"user_id"`
+	IsActive    bool       `json:"is_active"`
+	DeleteAfter *time.Time `json:"delete_after"`
+}
+
+func (c *Client) ToggleActivation(userID string) (*UserStatusResponse, error) {
+	var out UserStatusResponse
 	err := c.do("PATCH", "/api/admin/users/"+userID+"/switch", nil, &out)
-	return out.Active, err
+	return &out, err
 }
