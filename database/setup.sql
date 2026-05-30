@@ -15,9 +15,21 @@ DO $$ BEGIN
         'user_login',
         'user_logout',
 		'user_removed',
-        'key_rotated'
+        'key_rotated',
+        'secret_expired',
+        'token_refresh',
+        'admin_role_change',
+        'admin_cleanup',
+        'admin_user_toggle',
+        'rate_limit_hit',
+        'invalid_token'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$ BEGIN
+    CREATE TYPE audit_severity AS ENUM ('info', 'warning', 'critical');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
 
 CREATE TABLE IF NOT EXISTS public.users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,6 +114,7 @@ CREATE TABLE IF NOT EXISTS public.audit_logs (
     action          audit_action    NOT NULL,
     actor_id        UUID            REFERENCES public.users(id) ON DELETE SET NULL,
     actor_ip        INET            ,
+    severity        audit_severity  NOT NULL DEFAULT 'info',
     secret_id       UUID         REFERENCES public.secrets(id) ON DELETE SET NULL,
     metadata        JSONB           DEFAULT '{}'::jsonb,
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
