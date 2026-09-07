@@ -4,10 +4,11 @@ A production-style backend system with CLI support for securely sharing secrets 
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-async-green?logo=fastapi)
-![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-blue?logo=postgresql)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-blue?logo=postgresql)
 ![Redis](https://img.shields.io/badge/Redis-8-red?logo=redis)
 ![RabbitMQ](https://img.shields.io/badge/RabbitMQ-notifications-orange?logo=rabbitmq)
 ![Go](https://img.shields.io/badge/CLI-Go-00ADD8?logo=go)
+![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker)
 ![Railway](https://img.shields.io/badge/Deployed-Railway-purple?logo=railway)
 
 <!-- 🚀 Live: https://phantom-share-production.up.railway.app  
@@ -63,8 +64,11 @@ FastAPI (stateless API layer)
 ```
 phantom_share/
 ├── main.py                            # App entrypoint: registers routers, runs lifespan (DB pool, Redis, expiry worker)
+├── Dockerfile                         # Builds the FastAPI app image
+├── docker-compose.yml                 # Orchestrates app + Postgres + Redis + RabbitMQ with healthchecks
+├── .dockerignore                      # Keeps secrets, dev artifacts, and docs out of the image
 ├── database/
-│   └── setup.sql                      # PostgreSQL DDL - run once to create all tables, indexes, and triggers
+│   └── setup.sql                      # PostgreSQL DDL - auto-run on first Postgres boot via docker-entrypoint-initdb.d
 ├── requirements.txt                   # Full pinned dependencies (pip freeze)
 └── app/
     ├── core/                          # Infrastructure - wiring the app together
@@ -246,30 +250,59 @@ The CLI persists your base URL and auth tokens locally so you don't need to pass
 
 ---
 
-## Backend Quick Start
+## Backend Quick Start (Docker)
 
 ```bash
 git clone https://github.com/superb-striker/phantom-share
 cd phantom-share
-
-python -m venv env
-env\Scripts\activate        # Windows
-source env/bin/activate     # macOS/Linux
-
-pip install -r requirements.txt
 ```
 
 Create a `.env` file:
 
 ```env
-SECRET_ENCRYPTION_KEY=    
-JWT_SECRET_KEY=           
-SIGNED_URL_SECRET=        
-DATABASE_URL=             
+SECRET_ENCRYPTION_KEY=
+JWT_SECRET_KEY=
+SIGNED_URL_SECRET=
+DATABASE_URL=
 REDIS_URL=
 RABBITMQ_URL=
 SMTP_USERNAME=
-SMTP_PASSWORD=             
+SMTP_PASSWORD=
+
+# Used by docker-compose to provision Postgres and RabbitMQ containers
+POSTGRES_USERNAME=
+POSTGRES_PASSWORD=
+RABBITMQ_USERNAME=
+RABBITMQ_PASSWORD=
+```
+
+> **Note:** `DATABASE_URL`, `REDIS_URL`, and `RABBITMQ_URL` from `.env` are overridden by the `environment:` block in `docker-compose.yml` for the `phantom-share` service, so the app talks to `postgres`, `redis`, and `rabbitmq` by container/service name instead of `localhost`. The values above still matter for anyone running the app outside Docker (see fallback section below).
+
+Build and start everything (API + Postgres + Redis + RabbitMQ):
+
+```bash
+docker compose up --build
+```
+
+The Postgres container automatically runs `database/setup.sql` on first boot via `docker-entrypoint-initdb.d` - no manual DDL step needed. All services wait on healthchecks before the API container starts.
+
+Interactive docs -> http://localhost:8000/docs
+
+To stop everything:
+
+```bash
+docker compose down          # add -v to also wipe the named volumes (postgres_data, rabbitmq_data, redis_data)
+```
+
+<details>
+<summary><strong>Manual setup without Docker (fallback)</strong></summary>
+
+```bash
+python -m venv env
+env\Scripts\activate        # Windows
+source env/bin/activate     # macOS/Linux
+
+pip install -r requirements.txt
 ```
 
 Run the DDL (idempotent - safe to re-run):
@@ -290,11 +323,13 @@ Start services and the server:
 ```bash
 sudo systemctl start redis-server
 redis-cli ping              # EXPECTED OUTPUT: PONG
-docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management 
+docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 uvicorn main:app --reload
 ```
 
 Interactive docs -> http://localhost:8000/docs
+
+</details>
 
 ---
 
@@ -305,3 +340,4 @@ Interactive docs -> http://localhost:8000/docs
 - All list endpoints paginated - no unbounded queries.
 - Expiry worker holds a **Redis distributed lock** - safe to run multiple instances without duplicate deletions.
 - RabbitMQ consumers can be scaled independently of the API to handle notification load.
+- Local/dev orchestration via Docker Compose - Postgres, Redis, RabbitMQ, and the API each run in their own container, with healthchecks gating startup order so the app never starts before its dependencies are ready.
