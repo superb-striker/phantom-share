@@ -10,6 +10,7 @@ email-validator
 pydantic-settings
 bcrypt
 qrcode
+Pillow
 redis
 starlette
 uvicorn
