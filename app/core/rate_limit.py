@@ -45,13 +45,13 @@ if count >= max_requests then
     -- Reject: do NOT add this request to the set
     local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
     local oldest_ts = oldest[2] or '0'
-    return {count, oldest_ts}
+    return {0, count, oldest_ts}
 end
 
 -- Accept: record this request
 redis.call('ZADD', key, now, token)
 redis.call('EXPIRE', key, window_seconds)
-return {count + 1, '0'}
+return {1, count + 1, '0'}
 """
 
 # Cache the script SHA after the first SCRIPT LOAD so subsequent calls
@@ -92,9 +92,10 @@ async def rate_limit(key: str, max_requests: int, window_seconds: int) -> None:
     window_start = now - window_seconds
     token        = secrets.token_hex(8)   # unique member to avoid sorted-set collisions
     result = await _eval_script(redis, key, now, window_start, window_seconds, max_requests, token)
-    count     = int(result[0])
-    oldest_ts = float(result[1]) if result[1] != b"0" and result[1] != "0" else None
-    if count >= max_requests:
+    accepted = bool(int(result[0]))
+    count     = int(result[1])
+    oldest_ts = float(result[2]) if result[2] != b"0" and result[2] != "0" else None
+    if not accepted:
         # Retry-After: time until the oldest request in the window expires,
         # i.e. when the first slot will free up — more accurate than window_seconds.
         if oldest_ts:
