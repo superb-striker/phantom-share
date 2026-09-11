@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu       # exit with non zero status if a command fails and treat references to unset variables as unset and exit
+# Resolve paths independently of the caller's working directory.
+cd "$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec dbmate --env DBMATE_DATABASE_URL \
+  --migrations-dir database/migrations \
+  --schema-file database/schema.sql "$@"
