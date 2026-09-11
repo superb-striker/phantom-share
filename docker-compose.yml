@@ -1,16 +1,16 @@
+---
 services:
   postgres:
     image: postgres:16-alpine
     container_name: phantom-share-postgres
     environment:
-      POSTGRES_DB: phantom 
-      POSTGRES_USER: ${POSTGRES_USERNAME} 
+      POSTGRES_DB: phantom
+      POSTGRES_USER: ${POSTGRES_USERNAME}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/setup.sql:/docker-entrypoint-initdb.d/setup.sql:ro 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USERNAME} -d phantom"]
       interval: 10s
@@ -18,31 +18,31 @@ services:
       retries: 5
     restart: unless-stopped
     networks:
-      - phantom-share-net 
-  
+      - phantom-share-net
+
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: phantom-share-rabbitmq
     environment:
-      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME} 
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD}
     ports:
       - "5672:5672"
       - "15672:15672"
     volumes:
-      - rabbitmq_data:/var/lib/rabbitmq 
+      - rabbitmq_data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
-    networks: 
+    networks:
       - phantom-share-net
-  
+
   redis:
-    image: redis:8.4-alpine 
-    container_name: phantom-share-redis 
+    image: redis:8.4-alpine
+    container_name: phantom-share-redis
     ports:
       - "6379:6379"
     volumes:
@@ -56,11 +56,28 @@ services:
     networks:
       - phantom-share-net
 
+  migrate:
+    image: ghcr.io/amacneil/dbmate:2.35.1
+    environment:
+      DATABASE_URL: "postgres://postgres:5432/phantom?sslmode=disable"
+      PGUSER: ${POSTGRES_USERNAME}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      DBMATE_NO_DUMP_SCHEMA: "true"
+    volumes:
+      - ./database:/db:ro
+    command: ["--wait", "up"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - phantom-share-net
+
   phantom-share:
     build: .
-    container_name: phantom-share-app 
+    container_name: phantom-share-app
     env_file:
-      - .env 
+      - .env
     environment:
       # These override whatever is in .env, so the app talks to the other containers by their service name instead of localhost
       DATABASE_URL: "host=postgres dbname=phantom user=${POSTGRES_USERNAME} password=${POSTGRES_PASSWORD}"
@@ -69,6 +86,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       rabbitmq:
