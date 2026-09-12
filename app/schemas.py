@@ -1,9 +1,8 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import List, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field, AnyUrl, model_validator
+from pydantic import BaseModel, EmailStr, AnyUrl, Field, model_validator
 
 # Enums
 
@@ -65,6 +64,7 @@ class UserResponse(BaseModel):
     username: str
     role: str
     is_active: bool
+    is_verified: bool = False
     created_at: datetime
     
 # Admin
@@ -77,10 +77,10 @@ class AdminUserResponse(BaseModel):
     is_active:    bool
     created_at:   datetime
     updated_at:   datetime
-    delete_after: Optional[datetime] = None
+    delete_after: datetime | None = None
  
 class AdminUserListResponse(BaseModel):
-    items:     List[AdminUserResponse]
+    items:     list[AdminUserResponse]
     total:     int
     page:      int
     page_size: int
@@ -91,7 +91,7 @@ class RoleUpdateRequest(BaseModel):
 class UserStatusResponse(BaseModel):
     user_id:      UUID
     is_active:    bool
-    delete_after: Optional[datetime] = None
+    delete_after: datetime | None = None
     
 class CleanupResponse(BaseModel):
     secrets_deleted:  int
@@ -106,18 +106,23 @@ class SecretCreate(BaseModel):
     content: str = Field(..., min_length=1, max_length=10_000)
     ttl_hours: int = Field(default=24, ge=1, le=168)
     password_protected: bool = False
-    access_password: Optional[str] = Field(default=None, min_length=4, max_length=128)
+    access_password: str | None = Field(default=None, min_length=4, max_length=128)
     max_views: int = Field(default=1, ge=1, le=100) # Advanced expiry
+    allowed_emails: list[EmailStr] | None = Field(default=None, min_length=1, max_length=100)
     # Notifications
     notify_on_view: bool = False
-    notify_email: Optional[EmailStr] = None
-    webhook_url: Optional[AnyUrl] = Field(default=None, max_length=512)
+    notify_email: EmailStr | None = None
+    webhook_url: AnyUrl | None = Field(default=None, max_length=512)
     # Client-side E2E: if True, `content` is already ciphertext (base64)
     # and `client_nonce` must be supplied. Server will NOT decrypt.
     client_encrypted: bool = False
-    client_nonce: Optional[str] = None
+    client_nonce: str | None = None
     @model_validator(mode="after")
     def check_consistency(self) -> "SecretCreate":
+        if self.allowed_emails is not None:
+            self.allowed_emails = list(
+                dict.fromkeys(str(email).lower() for email in self.allowed_emails)
+            )
         if self.notify_on_view and not self.notify_email:
             raise ValueError("notify_email is required when notify_on_view is True")
         if self.password_protected and not self.access_password:
@@ -133,25 +138,25 @@ class SecretCreateResponse(BaseModel):
     share_url: str
     signed_token: str
     expires_at: datetime
-    qr_code: Optional[str] = None
+    qr_code: str | None = None
 
 class SecretRetrieveRequest(BaseModel):
     # Body for retrieving a secret (password + optional signed token)
-    access_password: Optional[str] = None
-    signed_token: Optional[str] = None
+    access_password: str | None = None
+    signed_token: str | None = None
 
 class SecretContent(BaseModel):
     content: str
     created_at: datetime
     expires_at: datetime
-    views_remaining: Optional[int] = None
+    views_remaining: int | None = None
     client_encrypted: bool = False  # client to decrypt locally
 
 class SecretInfo(BaseModel):
     # Metadata only – no content
     exists: bool
-    created_at: Optional[datetime] = None
-    expires_at: Optional[datetime] = None
+    created_at: datetime | None = None
+    expires_at: datetime | None = None
     password_protected: bool
     viewed: bool
     view_count: int
@@ -168,7 +173,7 @@ class SecretListItem(BaseModel):
     notify_on_view: bool
 
 class SecretListResponse(BaseModel):
-    items: List[SecretListItem]
+    items: list[SecretListItem]
     total: int
     page: int
     page_size: int
@@ -185,15 +190,15 @@ class StatsResponse(BaseModel):
 class AuditLogItem(BaseModel):
     id: int
     action: str
-    actor_id: Optional[UUID]
-    actor_ip: Optional[str]
-    secret_id: Optional[UUID]
+    actor_id: UUID | None
+    actor_ip: str | None
+    secret_id: UUID | None
     metadata: dict
     created_at: datetime
     severity: AuditSeverity = AuditSeverity.INFO 
 
 class AuditLogResponse(BaseModel):
-    items: List[AuditLogItem]
+    items: list[AuditLogItem]
     total: int
     page: int
     page_size: int
@@ -214,4 +219,22 @@ class MessageResponse(BaseModel):
 class ErrorResponse(BaseModel):
     # Standardised error envelope returned by FastAPI exception handlers
     detail:     str
-    error_code: Optional[str] = None   # e.g. "SECRET_NOT_FOUND", "RATE_LIMITED"
+    error_code: str | None = None   # e.g. "SECRET_NOT_FOUND", "RATE_LIMITED"
+
+class EmailVerificationRequest(BaseModel):
+    code: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+class SecretViewItem(BaseModel):
+    id: int
+    viewer_id: UUID | None
+    viewer_email: str | None
+    email_verified: bool
+    viewed_at: datetime
+
+class SecretViewsResponse(BaseModel):
+    items: list[SecretViewItem]
+    total: int
+    page: int
+    page_size: int
+    retain_until: datetime
+
