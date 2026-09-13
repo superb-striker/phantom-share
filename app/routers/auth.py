@@ -8,23 +8,34 @@ routers/auth.py – /api/auth/* endpoints.
   GET  /api/auth/me         – current user info
 """
 
+import secrets
+from datetime import datetime, timezone
 from uuid import UUID, uuid4
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
+from app.core.config import get_settings
 from app.core.database import get_pool
+from app.core.rate_limit import limiter
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
     get_current_user,
     hash_password,
+    sha256_hash,
     verify_password,
-    sha256_hash
 )
-from app.core.config import get_settings
-from app.core.rate_limit import limiter
-from app.schemas import RefreshRequest, TokenResponse, LoginRequest, RegisterRequest, UserResponse
-from app.services import audit_service
+from app.schemas import (
+    EmailVerificationRequest,
+    LoginRequest,
+    MessageResponse,
+    RefreshRequest,
+    RegisterRequest,
+    TokenResponse,
+    UserResponse,
+)
+from app.services import audit_service, verification_service
 
 settings = get_settings()
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -40,24 +51,23 @@ async def register(body: RegisterRequest, request: Request):
     '''
     pool = get_pool()
     pw_hash = hash_password(body.password)
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            # Check uniqueness
-            await cur.execute(
-                "SELECT id FROM users WHERE email = %s OR username = %s",
-                (body.email, body.username),
-            )
-            if await cur.fetchone():
-                raise HTTPException(status.HTTP_409_CONFLICT, detail="Email or username already taken")
-            await cur.execute(
-                """
-                INSERT INTO users (email, username, password_hash)
-                VALUES (%s, %s, %s)
-                RETURNING id, email, username, role, is_active, created_at
-                """,
-                (body.email, body.username, pw_hash),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        # Check uniqueness
+        await cur.execute(
+            "SELECT id FROM users WHERE email = %s OR username = %s",
+            (body.email, body.username),
+        )
+        if await cur.fetchone():
+            raise HTTPException(status.HTTP_409_CONFLICT, detail="Email or username already taken")
+        await cur.execute(
+            """
+            INSERT INTO users (email, username, password_hash)
+            VALUES (%s, %s, %s)
+            RETURNING id, email, username, role, is_active, created_at
+            """,
+            (body.email, body.username, pw_hash),
+        )
+        row = await cur.fetchone()
     if row is None:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, detail="User creation failed.")
     await audit_service.log(
@@ -207,44 +217,140 @@ async def logout(body: RefreshRequest, current_user: dict = Depends(get_current_
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
     h = sha256_hash(body.refresh_token)
     pool = get_pool()
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            if sid and isinstance(sid, str):
-                await cur.execute(
-                    """
-                    UPDATE sessions SET revoked = TRUE
-                    WHERE id = %s AND user_id = %s AND refresh_token_hash = %s AND revoked = FALSE
-                    """,
-                    (sid, sub, h),
-                )
-            else:
-                await cur.execute(
-                    """
-                    UPDATE sessions SET revoked = TRUE
-                    WHERE refresh_token_hash = %s AND user_id = %s AND revoked = FALSE
-                    """,
-                    (h, sub),
-                )
-            if cur.rowcount == 0:
-                raise HTTPException(
-                    status.HTTP_401_UNAUTHORIZED,
-                    detail="Session not found, already revoked, or refresh token was rotated",
-                )
+    async with pool.connection() as conn, conn.cursor() as cur:
+        if sid and isinstance(sid, str):
+            await cur.execute(
+                """
+                UPDATE sessions SET revoked = TRUE
+                WHERE id = %s AND user_id = %s AND refresh_token_hash = %s AND revoked = FALSE
+                """,
+                (sid, sub, h),
+            )
+        else:
+            await cur.execute(
+                """
+                UPDATE sessions SET revoked = TRUE
+                WHERE refresh_token_hash = %s AND user_id = %s AND revoked = FALSE
+                """,
+                (h, sub),
+            )
+        if cur.rowcount == 0:
+            raise HTTPException(
+                status.HTTP_401_UNAUTHORIZED,
+                detail="Session not found, already revoked, or refresh token was rotated",
+            )
     await audit_service.log("user_logout", actor_id=UUID(sub), actor_ip=None)
 
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: dict = Depends(get_current_user)):
     pool = get_pool()
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, email, username, role, is_active, created_at FROM users WHERE id = %s",
-                (current_user["id"],),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
+                SELECT id, email, username, role, is_active, created_at, is_verified
+                FROM users WHERE id = %s
+                """,
+            (current_user["id"],),
+        )
+        row = await cur.fetchone()
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="User not found.")
     return UserResponse(
         id=row[0], email=row[1], username=row[2],
-        role=row[3], is_active=row[4], created_at=row[5],
+        role=row[3], is_active=row[4], created_at=row[5], is_verified=row[6],
     )
+
+
+@router.post(
+    "/verification/request",
+    response_model=MessageResponse,
+    dependencies=[Depends(limiter(5, 900, scope="email_verification_request", force_ip=True))],
+)
+async def request_email_verification(current_user: dict = Depends(get_current_user)):
+    """Email a short-lived, single-use code to the current account address."""
+    async with get_pool().connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT email, is_verified FROM users WHERE id = %s FOR UPDATE",
+            (current_user["id"],),
+        )
+        user = await cur.fetchone()
+        if not user:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+        if user[1]:
+            return MessageResponse(message="Email is already verified")
+
+        await cur.execute(
+            "SELECT requested_at FROM email_verifications WHERE user_id = %s",
+            (current_user["id"],),
+        )
+        prior = await cur.fetchone()
+        if prior and (datetime.now(timezone.utc) - prior[0]).total_seconds() < 60:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "Wait 60 seconds before requesting another code",
+                headers={"Retry-After": "60"},
+            )
+
+        code = secrets.token_hex(32)
+        await cur.execute(
+            """
+                INSERT INTO email_verifications(user_id, email, token_hash, expires_at)
+                VALUES (%s, %s, %s, clock_timestamp() + INTERVAL '15 minutes')
+                ON CONFLICT (user_id) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    token_hash = EXCLUDED.token_hash,
+                    expires_at = EXCLUDED.expires_at,
+                    requested_at = clock_timestamp()
+                """,
+            (current_user["id"], user[0], sha256_hash(code)),
+        )
+        try:
+            await verification_service.send_code(user[0], code)
+        except Exception:
+            # Raising inside the connection context rolls back the challenge.
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Verification email could not be sent; try again later",
+            ) from None
+
+    return MessageResponse(message="Verification code sent; expires in 15 minutes")
+
+
+@router.post(
+    "/verification/confirm",
+    response_model=MessageResponse,
+    dependencies=[Depends(limiter(10, 900, scope="email_verification_confirm", force_ip=True))],
+)
+async def confirm_email_verification(
+    body: EmailVerificationRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Consume a valid code and mark the current account email as verified."""
+    async with get_pool().connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT email FROM users WHERE id = %s FOR UPDATE",
+            (current_user["id"],),
+        )
+        user = await cur.fetchone()
+        if not user:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+        await cur.execute(
+            """
+                DELETE FROM email_verifications
+                WHERE user_id = %s AND email = %s AND token_hash = %s
+                  AND expires_at > clock_timestamp()
+                RETURNING user_id
+                """,
+            (current_user["id"], user[0], sha256_hash(body.code)),
+        )
+        if not await cur.fetchone():
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Invalid or expired verification code",
+            )
+        await cur.execute(
+            "UPDATE users SET is_verified = TRUE WHERE id = %s",
+            (current_user["id"],),
+        )
+
+    return MessageResponse(message="Email verified")
