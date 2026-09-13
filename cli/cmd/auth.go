@@ -26,7 +26,7 @@ var authLoginCmd = &cobra.Command{
 	Example: `  phantom auth login
   PHANTOM_BASE_URL=https://myserver.com phantom auth login`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		
+
 		if config.AccessToken() != "" {
 			return fmt.Errorf("already logged in as %s – run 'phantom auth logout' first", config.Username())
 		}
@@ -144,6 +144,7 @@ var authWhoamiCmd = &cobra.Command{
 		output.Field("Email", user.Email)
 		output.Field("Role", output.RoleColor(user.Role))
 		output.Field("Active", output.BoolIcon(user.IsActive))
+		output.Field("Email verified", output.BoolIcon(user.IsVerified))
 		output.Field("Member since", output.FormatTime(user.CreatedAt))
 		fmt.Println()
 		return nil
@@ -153,7 +154,6 @@ var authWhoamiCmd = &cobra.Command{
 func init() {
 	authCmd.AddCommand(authLoginCmd, authRegisterCmd, authLogoutCmd, authWhoamiCmd)
 }
-
 
 // TODO: Fix the Ctrl+C bug which breaks the prompt
 func prompt(label string) string {

@@ -87,23 +87,25 @@ type TokenResponse struct {
 }
 
 type UserResponse struct {
-	ID        string    `json:"id"`
-	Email     string    `json:"email"`
-	Username  string    `json:"username"`
-	Role      string    `json:"role"`
-	IsActive  bool      `json:"is_active"`
-	CreatedAt time.Time `json:"created_at"`
+	ID         string    `json:"id"`
+	Email      string    `json:"email"`
+	Username   string    `json:"username"`
+	Role       string    `json:"role"`
+	IsActive   bool      `json:"is_active"`
+	IsVerified bool      `json:"is_verified"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 type SecretCreateRequest struct {
-	Content           string `json:"content"`
-	TTLHours          int    `json:"ttl_hours"`
-	PasswordProtected bool   `json:"password_protected"`
-	AccessPassword    string `json:"access_password,omitempty"`
-	MaxViews          int    `json:"max_views"`
-	NotifyOnView      bool   `json:"notify_on_view,omitempty"`
-	NotifyEmail       string `json:"notify_email,omitempty"`
-	WebhookURL        string `json:"webhook_url,omitempty"`
+	Content           string   `json:"content"`
+	TTLHours          int      `json:"ttl_hours"`
+	PasswordProtected bool     `json:"password_protected"`
+	AccessPassword    string   `json:"access_password,omitempty"`
+	MaxViews          int      `json:"max_views"`
+	AllowedEmails     []string `json:"allowed_emails,omitempty"`
+	NotifyOnView      bool     `json:"notify_on_view,omitempty"`
+	NotifyEmail       string   `json:"notify_email,omitempty"`
+	WebhookURL        string   `json:"webhook_url,omitempty"`
 }
 
 type SecretCreateResponse struct {
@@ -353,4 +355,41 @@ func (c *Client) ToggleActivation(userID string) (*UserStatusResponse, error) {
 	var out UserStatusResponse
 	err := c.do("PATCH", "/api/admin/users/"+userID+"/switch", nil, &out)
 	return &out, err
+}
+
+type SecretView struct {
+	ID            int64     `json:"id"`
+	ViewerID      *string   `json:"viewer_id"`
+	ViewerEmail   *string   `json:"viewer_email"`
+	EmailVerified bool      `json:"email_verified"`
+	ViewedAt      time.Time `json:"viewed_at"`
+}
+
+type SecretViewsResponse struct {
+	Items       []SecretView `json:"items"`
+	Total       int          `json:"total"`
+	Page        int          `json:"page"`
+	PageSize    int          `json:"page_size"`
+	RetainUntil time.Time    `json:"retain_until"`
+}
+
+func (c *Client) SecretViews(secretID string, page, pageSize int) (*SecretViewsResponse, error) {
+	var out SecretViewsResponse
+	path := fmt.Sprintf(
+		"/api/secrets/%s/views?page=%d&page_size=%d",
+		url.PathEscape(secretID), page, pageSize,
+	)
+	err := c.do("GET", path, nil, &out)
+	return &out, err
+}
+
+func (c *Client) RequestEmailVerification() error {
+	return c.do("POST", "/api/auth/verification/request", nil, nil)
+}
+
+func (c *Client) ConfirmEmailVerification(code string) error {
+	return c.do(
+		"POST", "/api/auth/verification/confirm",
+		map[string]string{"code": code}, nil,
+	)
 }
