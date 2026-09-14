@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.core.config import get_settings
 from app.core.permissions import require_owns_secret, require_user
-from app.helper import decrypt_content, encrypt_content, generate_dek, wrap_dek
+from app.helper import decrypt_content, encrypt_content
 from app.routers import secrets
 from app.schemas_versioning import (
     SecretUpdate,
@@ -16,7 +16,7 @@ from app.schemas_versioning import (
     SecretVersionList,
 )
 from app.services import audit_service
-from app.services.key_service import get_dek_for_secret
+from app.services.key_service import create_version_key, get_dek_for_secret
 
 settings = get_settings()
 router = APIRouter(tags=["secret versions"])
@@ -35,28 +35,15 @@ async def _insert_text_version(
     actor_id: str,
     change_note: str | None,
 ) -> int:
-    dek = generate_dek()
+    dek, key_version = await create_version_key(conn, secret_id)
     ciphertext, nonce = encrypt_content(plaintext, dek)
-    wrapped_dek, dek_nonce = wrap_dek(dek)
     async with conn.cursor() as cur:
-        await cur.execute(
-            "SELECT COALESCE(MAX(version), 0) + 1 FROM secret_keys WHERE secret_id = %s",
-            (secret_id,),
-        )
-        key_version = (await cur.fetchone())[0]
-        await cur.execute(
-            """
-            INSERT INTO secret_keys(secret_id, wrapped_dek, dek_nonce, version, rotated_at)
-            VALUES (%s, %s, %s, %s, clock_timestamp())
-            """,
-            (secret_id, wrapped_dek, dek_nonce, key_version),
-        )
         await cur.execute(
             """
             INSERT INTO secret_versions(
                 secret_id, version, content, nonce, key_version,
                 plaintext_size, created_by, change_note
-            ) VALUES (%s, %s, 'text', %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 secret_id,
@@ -181,10 +168,10 @@ async def list_secret_versions(
         items=[
             SecretVersionItem(
                 version=row[0],
-                plaintext_size=row[2],
-                created_by=row[3],
-                change_note=row[4],
-                created_at=row[5],
+                plaintext_size=row[1],
+                created_by=row[2],
+                change_note=row[3],
+                created_at=row[4],
                 is_current=row[0] == secret[1],
             )
             for row in rows
