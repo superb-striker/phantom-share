@@ -7,7 +7,6 @@ Responsibilities:
   - Rotate a DEK: re-encrypt the secret content under a new DEK.
 """
 from psycopg.rows import dict_row
-from datetime import datetime, timezone
 from psycopg_pool import AsyncConnectionPool
 
 from app.helper import (
@@ -17,6 +16,7 @@ from app.helper import (
     unwrap_dek,
     wrap_dek,
 )
+
 
 async def create_key_for_secret(
     conn, secret_id: str
@@ -41,7 +41,37 @@ async def create_key_for_secret(
         )
     return dek, wrapped_dek, dek_nonce
 
-async def get_dek_for_secret(conn, secret_id: str) -> bytes:
+
+async def create_version_key(conn, secret_id: str) -> tuple[bytes, int]:
+    """Create and persist the next DEK for a locked secret.
+
+    The caller owns the transaction and must lock the corresponding ``secrets``
+    row before calling this function. That makes key-version allocation serial
+    for the secret and lets content changes and their key commit atomically.
+
+    Returns the plaintext DEK for immediate use and its persisted key version.
+    """
+    dek = generate_dek()
+    wrapped_dek, dek_nonce = wrap_dek(dek)
+    async with conn.cursor() as cur:
+        await cur.execute(
+            """
+            INSERT INTO secret_keys
+                (secret_id, wrapped_dek, dek_nonce, version, rotated_at)
+            SELECT %s, %s, %s, COALESCE(MAX(version), 0) + 1,
+                   clock_timestamp()
+            FROM secret_keys
+            WHERE secret_id = %s
+            RETURNING version
+            """,
+            (secret_id, wrapped_dek, dek_nonce, secret_id),
+        )
+        row = await cur.fetchone()
+    if not row:
+        raise RuntimeError(f"Failed to create an encryption key for secret {secret_id}")
+    return dek, row[0]
+
+async def get_dek_for_secret(conn, secret_id: str, key_version: int | None = None) -> bytes:
     '''Load the latest wrapped DEK for a secret and unwrap it.
  
     Returns:
@@ -51,16 +81,22 @@ async def get_dek_for_secret(conn, secret_id: str) -> bytes:
         ValueError: if no key record exists for the secret.
     '''
     async with conn.cursor(row_factory=dict_row) as cur:
-        await cur.execute(
-            """
-            SELECT wrapped_dek, dek_nonce
-            FROM secret_keys
-            WHERE secret_id = %s
-            ORDER BY version DESC
-            LIMIT 1
-            """,
-            (secret_id,),
-        )
+        if key_version is None:
+            await cur.execute(
+                """
+                SELECT wrapped_dek, dek_nonce FROM secret_keys
+                WHERE secret_id = %s ORDER BY version DESC LIMIT 1
+                """,
+                (secret_id,),
+            )
+        else:
+            await cur.execute(
+                """
+                SELECT wrapped_dek, dek_nonce FROM secret_keys
+                WHERE secret_id = %s AND version = %s
+                """,
+                (secret_id, key_version),
+            )
         row = await cur.fetchone()
     if not row:
         raise ValueError(f"No encryption key found for secret {secret_id}")
@@ -107,40 +143,29 @@ async def rotate_key(pool: AsyncConnectionPool, secret_id: str) -> int:
                 decrypt_content(old_ciphertext, old_nonce, old_dek).encode()
             )
             try:
-                # Step 4 : generate a new DEK and re-encrypt.
-                new_dek = generate_dek()
+                # Step 4 : allocate the next key version and re-encrypt.
+                new_dek, new_version = await create_version_key(conn, secret_id)
                 new_ciphertext, new_nonce = encrypt_content(
                     plaintext_bytes.decode(), new_dek
                 )
-                new_wrapped, new_dek_nonce = wrap_dek(new_dek)
             finally:
                 # Zero out plaintext regardless of success or failure.
                 for i in range(len(plaintext_bytes)):
                     plaintext_bytes[i] = 0
-            # Step 5 : insert new key record with an atomically computed version,
-            # then update the secret ciphertext; both happen inside the transaction.
+            # Step 5 : update the ciphertext and its version record in the same
+            # transaction as the new key.
             async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    INSERT INTO secret_keys
-                        (secret_id, wrapped_dek, dek_nonce, version, rotated_at)
-                    SELECT %s, %s, %s, COALESCE(MAX(version), 0) + 1, %s
-                    FROM secret_keys
-                    WHERE secret_id = %s
-                    RETURNING version
-                    """,
-                    (
-                        secret_id,
-                        new_wrapped,
-                        new_dek_nonce,
-                        datetime.now(timezone.utc),
-                        secret_id,
-                    ),
-                )
-                row = await cur.fetchone()
-                new_version = row[0] if row else 0
                 await cur.execute(
                     "UPDATE secrets SET content = %s, nonce = %s WHERE id = %s",
                     (new_ciphertext, new_nonce, secret_id),
+                )
+                await cur.execute(
+                    """
+                    UPDATE secret_versions
+                    SET content = %s, nonce = %s, key_version = %s
+                    WHERE secret_id = %s
+                      AND version = (SELECT current_version FROM secrets WHERE id = %s)
+                    """,
+                    (new_ciphertext, new_nonce, new_version, secret_id, secret_id),
                 )
     return new_version
