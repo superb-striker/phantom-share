@@ -18,12 +18,12 @@ Distributed locking (multi-instance safety):
     entirely — no duplicate deletions, no race on bulk cleanup.
 """
 import asyncio
-from datetime import datetime, timezone
 import uuid
+from datetime import datetime, timezone
 
 from app.core.database import get_pool
 from app.core.redis_client import get_redis
-from app.services import audit_service
+from app.services import audit_service, quota_service, storage_service
 
 REDIS_EXPIRY_PREFIX = "phantom:expiry:"
 REDIS_LOCK_PREFIX   = "phantom:lock:"          # per-secret deletion lock
@@ -92,7 +92,7 @@ async def delete_secret(secret_id: str) -> None:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "DELETE FROM secrets WHERE id = %s RETURNING id", (secret_id,)
+                    "DELETE FROM secrets WHERE id = %s RETURNING id, owner_id", (secret_id,)
                 )
                 deleted = await cur.fetchone()
         # Only audit if the row actually existed - avoids ghost entries for
@@ -103,6 +103,8 @@ async def delete_secret(secret_id: str) -> None:
                 secret_id=uuid.UUID(secret_id),
                 metadata={"reason": "ttl_expired", "source": "redis_event"},
             )
+            if deleted[1]:
+                await quota_service.reconcile_user(str(deleted[1]))
     finally:
         await release_lock(lock_key, token)
 
@@ -135,10 +137,11 @@ async def fallback_sweep() -> dict:
                     """
                     DELETE FROM secrets
                     WHERE expires_at < NOW() OR view_count >= max_views
-                    RETURNING id
+                    RETURNING id, owner_id
                     """
                 )
-                deleted_secrets = [row[0] for row in await cur.fetchall()]
+                deleted_secret_rows = await cur.fetchall()
+                deleted_secrets = [row[0] for row in deleted_secret_rows]
                 # Inactive users past their delete_after date
                 await cur.execute(
                     """
@@ -148,6 +151,13 @@ async def fallback_sweep() -> dict:
                     """
                 )
                 deleted_users = [row[0] for row in await cur.fetchall()]
+                # Tracking and verification challenges have independent lifetimes.
+                await cur.execute(
+                    "DELETE FROM secret_tracking WHERE retain_until <= clock_timestamp()"
+                )
+                await cur.execute(
+                    "DELETE FROM email_verifications WHERE expires_at <= clock_timestamp()"
+                )
                 # Revoked or expired sessions
                 await cur.execute(
                     """
@@ -164,6 +174,9 @@ async def fallback_sweep() -> dict:
                 secret_id=secret_id,
                 metadata={"reason": "ttl_expired/max_views_achieved", "source": "fallback_sweep"},
             )
+        for owner_id in {row[1] for row in deleted_secret_rows if row[1]}:
+            await quota_service.reconcile_user(str(owner_id))
+        await process_storage_cleanup()
         # Log per user so user_id is captured individually
         for user_id in deleted_users:
             await audit_service.log(
@@ -215,6 +228,82 @@ async def fallback_loop() -> None:
                 print(f"[CLEANUP] Fallback sweep removed {deleted} row(s)")
         except Exception as exc:
             print(f"[CLEANUP ERROR] Fallback sweep failed: {exc}")
+
+
+async def process_storage_cleanup() -> dict:
+    """Delete orphaned objects and uploads, then repair affected counters."""
+    affected_users: set[str] = set()
+    objects_deleted = 0
+    pending_deleted = 0
+    async with get_pool().connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT id, object_key, user_id FROM object_deletion_outbox
+                WHERE processed_at IS NULL AND next_attempt_at <= clock_timestamp()
+                ORDER BY id LIMIT 100
+                """
+            )
+            outbox = await cur.fetchall()
+            await cur.execute(
+                """
+                SELECT id, object_key, user_id, reservation_id
+                FROM pending_uploads WHERE expires_at <= clock_timestamp()
+                ORDER BY expires_at LIMIT 100
+                """
+            )
+            pending = await cur.fetchall()
+
+    for row_id, object_key, user_id in outbox:
+        try:
+            await storage_service.delete(object_key)
+            async with get_pool().connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "UPDATE object_deletion_outbox SET processed_at = clock_timestamp(), last_error = NULL WHERE id = %s",
+                        (row_id,),
+                    )
+            objects_deleted += 1
+            if user_id:
+                affected_users.add(str(user_id))
+        except Exception as exc:
+            async with get_pool().connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        UPDATE object_deletion_outbox SET attempts = attempts + 1,
+                            last_error = %s,
+                            next_attempt_at = clock_timestamp() +
+                                LEAST(3600, POWER(2, LEAST(attempts, 11))) * INTERVAL '1 second'
+                        WHERE id = %s
+                        """,
+                        (str(exc)[:1000], row_id),
+                    )
+
+    for pending_id, object_key, user_id, reservation_id in pending:
+        try:
+            await storage_service.delete(object_key)
+            async with get_pool().connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("DELETE FROM pending_uploads WHERE id = %s", (pending_id,))
+            await quota_service.release(quota_service.Reservation(
+                str(reservation_id), str(user_id), 0, 0
+            ))
+            affected_users.add(str(user_id))
+            pending_deleted += 1
+        except Exception:
+            continue
+
+    try:
+        await quota_service.reap_expired_reservations()
+    except Exception:
+        pass
+    for user_id in affected_users:
+        try:
+            await quota_service.reconcile_user(user_id)
+        except Exception:
+            pass
+    return {"objects_deleted": objects_deleted, "pending_uploads_deleted": pending_deleted}
 
 
 async def expiry_worker() -> None:
