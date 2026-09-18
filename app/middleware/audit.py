@@ -7,15 +7,14 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
 
+from app.core.client_ip import resolve_client_ip
+
 
 class AuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Resolve client IP (respects reverse-proxy X-Forwarded-For)
-        forwarded = request.headers.get("X-Forwarded-For")
-        request.state.client_ip = (
-            forwarded.split(",")[0].strip()
-            if forwarded
-            else (request.client.host if request.client else "unknown")
+        request.state.client_ip = resolve_client_ip(
+            request.client.host if request.client else None,
+            request.headers.get("X-Forwarded-For"),
         )
         response = await call_next(request)
         # Security headers
