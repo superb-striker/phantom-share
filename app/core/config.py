@@ -1,5 +1,6 @@
 from functools import lru_cache
-from typing import List, ClassVar
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,8 +15,32 @@ class Settings(BaseSettings):
     DB_MIN_POOL: int
     DB_MAX_POOL: int
 
+    VIEW_HISTORY_RETENTION_DAYS: int = Field(default=30, ge=1, le=365)
+    MAX_SECRET_VERSIONS: int = Field(default=100, ge=1, le=1000)
+    MAX_FILE_BYTES: int = Field(default=52_428_800, ge=1)
+    DEFAULT_MAX_ACTIVE_SECRETS: int = Field(default=100, ge=1)
+    DEFAULT_MAX_FILE_STORAGE_BYTES: int = Field(default=1_073_741_824, ge=1)
+    UPLOAD_TEMP_DIR: str = "/tmp/phantom-uploads"
+
     # Redis
     REDIS_URL: str
+
+    # S3-compatible encrypted file storage
+    S3_BUCKET: str = "phantom-share"
+    S3_REGION: str = "us-east-1"
+    S3_ENDPOINT_URL: str = ""
+    S3_ACCESS_KEY_ID: str = ""
+    S3_SECRET_ACCESS_KEY: str = ""
+
+    # ClamAV daemon (private network only)
+    CLAMAV_HOST: str = "clamav"
+    CLAMAV_PORT: int = 3310
+    CLAMAV_TIMEOUT_SECONDS: int = 60
+
+    # Network/location access controls. Forwarded headers are trusted only
+    # when the direct socket peer belongs to one of these networks.
+    TRUSTED_PROXY_CIDRS: list[str] = Field(default_factory=list)
+    GEOIP_DATABASE_PATH: str = ""
 
     # Encryption 
     CHACHA_KEY_BYTES : int 
@@ -56,7 +81,7 @@ class Settings(BaseSettings):
     RABBITMQ_URL : str
     
     # CORS
-    CORS_ORIGINS: List[str] 
+    CORS_ORIGINS: list[str] 
  
     model_config = SettingsConfigDict(
         env_file = ".env",
@@ -64,6 +89,6 @@ class Settings(BaseSettings):
         extra = "ignore"
     )
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     return Settings()
