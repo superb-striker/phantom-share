@@ -1,18 +1,16 @@
 import hashlib
 import hmac
 import time
-from uuid import UUID, uuid4
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from uuid import UUID, uuid4
 
 import bcrypt
-from jose import JWTError, jwt
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 
 from app.core.config import get_settings
 from app.core.database import get_pool
-
 
 settings = get_settings()
 # If token is missing -> don’t immediately throw error, lets us handle auth manually (useful for optional auth routes)
@@ -82,12 +80,15 @@ def decode_token(token: str) -> dict:
 
 
 # Signed share-link tokens
-def create_signed_token(secret_id: UUID, expires_in_hours: int) -> str:
+def create_signed_token(
+    secret_id: UUID, expires_in_hours: int, policy_version: int = 1,
+    expires_at: datetime | None = None,
+) -> str:
     ''' Generate a signed, time-limited share token for a secret. \n
     Returns a URL-safe signed token: <secret_id>.<ts>.<sig> 
     '''
-    ts = int(time.time()) + expires_in_hours * 3600
-    payload = f"{secret_id}.{ts}"
+    ts = int(expires_at.timestamp()) if expires_at else int(time.time()) + expires_in_hours * 3600
+    payload = f"{secret_id}.{ts}.{policy_version}"
     sig = hmac.new(
         settings.SIGNED_URL_SECRET.encode(),
         payload.encode(),
@@ -95,10 +96,21 @@ def create_signed_token(secret_id: UUID, expires_in_hours: int) -> str:
     ).hexdigest()
     return f"{payload}.{sig}"
 
-def verify_signed_token(token: str) -> str:
+def verify_signed_token(token: str, expected_policy_version: int | None = None) -> str:
     '''Validate a signed share token and return its associated secret ID  or raises 403 if invalid'''
     try:
-        secret_id, ts_str, sig = token.rsplit(".", 2)
+        parts = token.rsplit(".", 3)
+        if len(parts) == 4:
+            secret_id, ts_str, policy_str, sig = parts
+            policy_version = int(policy_str)
+            payload = f"{secret_id}.{ts_str}.{policy_version}"
+        elif len(parts) == 3:
+            # Tokens issued before location policies existed map to policy v1.
+            secret_id, ts_str, sig = parts
+            policy_version = 1
+            payload = f"{secret_id}.{ts_str}"
+        else:
+            raise ValueError
     except ValueError:
         raise HTTPException(status_code=403, detail="Invalid share token")
     try:
@@ -107,7 +119,6 @@ def verify_signed_token(token: str) -> str:
         raise HTTPException(status_code=403, detail="Invalid share token")
     if time.time() > ts:
         raise HTTPException(status_code=403, detail="Share token has expired")
-    payload = f"{secret_id}.{ts}"
     expected = hmac.new(
         settings.SIGNED_URL_SECRET.encode(),
         payload.encode(),
@@ -115,13 +126,15 @@ def verify_signed_token(token: str) -> str:
     ).hexdigest()
     if not hmac.compare_digest(sig, expected):
         raise HTTPException(status_code=403, detail="Invalid share token signature")
+    if expected_policy_version is not None and policy_version != expected_policy_version:
+        raise HTTPException(status_code=403, detail="Share token policy is no longer current")
     return secret_id
 
 
 # FastAPI dependency: current user
 # For protected routes (must login)
 async def get_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
 ) -> dict:
     '''Authenticate the current user from a Bearer token and return the user details if validated.'''
     if not credentials:
@@ -144,11 +157,10 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     pool = get_pool()
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT u.id, u.email, u.username, u.role, u.is_active
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
+                SELECT u.id, u.email, u.username, u.role, u.is_active, u.is_verified
                 FROM users u
                 INNER JOIN sessions s ON s.user_id = u.id
                 WHERE u.id = %s
@@ -156,21 +168,24 @@ async def get_current_user(
                   AND s.revoked = FALSE
                   AND s.expires_at > NOW()
                 """,
-                (sub, sid),
-            )
-            row = await cur.fetchone()
+            (sub, sid),
+        )
+        row = await cur.fetchone()
     if not row or not row[4]:  # is_active
         raise HTTPException(
             status_code=401,
             detail="Session revoked, expired, or user inactive",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    return {"id": str(row[0]), "email": row[1], "username": row[2], "role": row[3],  "is_active": row[4]}
+    return {
+        "id": str(row[0]), "email": row[1], "username": row[2],
+        "role": row[3], "is_active": row[4], "is_verified": row[5],
+    }
 
 # For public routes (optional login)
 async def get_current_user_optional(
-    credentials: Optional[HTTPAuthorizationCredentials] = Security(bearer_scheme),
-) -> Optional[dict]:
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+) -> dict | None:
     '''Return the authenticated user if valid, and None for anonymous requests'''
     if not credentials:
         return None
