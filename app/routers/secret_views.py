@@ -60,7 +60,7 @@ async def secret_views(
         total = row[0]
         await cur.execute(
             """
-            SELECT id, viewer_id, viewer_email, email_verified, viewed_at
+            SELECT id, viewer_id, viewer_email, email_verified, viewed_at, content_version
             FROM secret_views
             WHERE secret_id = %s
             ORDER BY viewed_at DESC, id DESC
@@ -78,6 +78,7 @@ async def secret_views(
                 viewer_email=row[2],
                 email_verified=row[3],
                 viewed_at=row[4],
+                content_version=row[5],
             )
             for row in rows
         ],
