@@ -14,3 +14,6 @@ Pillow
 redis
 starlette
 uvicorn
+boto3
+python-multipart
+geoip2
