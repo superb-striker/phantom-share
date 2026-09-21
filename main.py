@@ -2,18 +2,18 @@
 main.py – Application entry point.
 """
 import asyncio
-import uvicorn
 import logging
 from contextlib import asynccontextmanager
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
-from app.core.database import close_pool, init_pool, get_pool
+from app.core.database import close_pool, get_pool, init_pool
 from app.core.redis_client import close_redis, init_redis
 from app.middleware.audit import AuditMiddleware
-from app.routers import admin, auth, secrets, stats
+from app.routers import admin, auth, files, quotas, secrets, stats
 from app.services.cleanup_service import expiry_worker
 from app.services.notification_worker import notification_worker, stop_worker
 
@@ -113,7 +113,9 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(files.router)
 app.include_router(secrets.router)
+app.include_router(quotas.router)
 app.include_router(admin.router)
 app.include_router(stats.router)
 
