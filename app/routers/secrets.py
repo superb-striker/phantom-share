@@ -13,19 +13,28 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
+
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    responses,
+    status,
+)
 from psycopg import sql
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status, responses
 
 from app.core.config import get_settings
 from app.core.database import get_pool
 from app.core.permissions import require_owns_secret, require_user
+from app.core.rate_limit import limiter
 from app.core.security import (
     create_signed_token,
     get_current_user_optional,
     sha256_hash,
-    verify_signed_token,
 )
-from app.core.rate_limit import limiter
 from app.helper import (
     decrypt_content,
     encrypt_content,
@@ -36,15 +45,23 @@ from app.helper import (
 )
 from app.schemas import (
     KeyRotateResponse,
-    SecretContent,
-    SecretCreate,
     SecretCreateResponse,
-    SecretInfo,
     SecretListItem,
     SecretListResponse,
     SecretRetrieveRequest,
 )
-from app.services import audit_service, cleanup_service, notification_service
+from app.schemas_access import SecretCreateWithPolicy as SecretCreate
+from app.schemas_access import SecretInfoWithPolicy as SecretInfo
+from app.schemas_versioning import (
+    VersionedSecretContent as SecretContent,
+)
+from app.services import (
+    audit_service,
+    cleanup_service,
+    location_policy_service,
+    notification_service,
+    quota_service,
+)
 from app.services.key_service import get_dek_for_secret, rotate_key
 
 settings = get_settings()
@@ -52,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/secrets", tags=["secrets"])
 
-async def _insert_secret(conn, content: str, nonce: Optional[str], body: SecretCreate, owner_id) -> str:
+async def _insert_secret(conn, content: str, nonce: str | None, body: SecretCreate, owner_id) -> str:
     """Insert a secrets row and return its UUID as a string."""
     pw_hash = sha256_hash(body.access_password) if body.password_protected and body.access_password else None
     async with conn.cursor() as cur:
@@ -61,8 +78,8 @@ async def _insert_secret(conn, content: str, nonce: Optional[str], body: SecretC
             INSERT INTO secrets (
                 content, nonce, password_protected, access_password_hash,
                 ttl_hours, max_views, notify_on_view,
-                notify_email, webhook_url, owner_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                notify_email, webhook_url, owner_id, email_restricted
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
             """,
             (
@@ -72,7 +89,7 @@ async def _insert_secret(conn, content: str, nonce: Optional[str], body: SecretC
                 body.notify_on_view,
                 str(body.notify_email)  if body.notify_email  else None,
                 str(body.webhook_url)   if body.webhook_url   else None,
-                owner_id,
+                owner_id, body.allowed_emails is not None,
             ),
         )
         row = await cur.fetchone()
@@ -88,24 +105,29 @@ async def _insert_secret(conn, content: str, nonce: Optional[str], body: SecretC
 async def create_secret(
     body: SecretCreate,
     request: Request,
-    current_user: Optional[dict] = Depends(get_current_user_optional),
+    current_user: dict = Depends(require_user),
 ):
-    owner_id = current_user["id"] if current_user else None
-    async with get_pool().connection() as conn:
-        async with conn.transaction():
+    owner_id = current_user["id"]
+    reservation = await quota_service.reserve(owner_id, secrets=1)
+    try:
+        async with get_pool().connection() as conn, conn.transaction():
+            key_version = None
+            encrypted_content = body.content
+            content_nonce = body.client_nonce
             if body.client_encrypted:
-                # Validate that content + nonce are well-formed base64 before storing.
-                # Catches malformed input early with a clean 400 instead of a 500 at decrypt time.
                 try:
-                    validate_client_encrypted(body.content, body.client_nonce) # type: ignore
+                    validate_client_encrypted(body.content, body.client_nonce)  # type: ignore
                 except ValueError as exc:
                     raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
                 secret_id = await _insert_secret(conn, body.content, body.client_nonce, body, owner_id)
             else:
                 dek = generate_dek()
-                wrapped_dek, dek_nonce      = wrap_dek(dek)
-                encrypted_content, nonce    = encrypt_content(body.content, dek)
-                secret_id = await _insert_secret(conn, encrypted_content, nonce, body, owner_id)
+                wrapped_dek, dek_nonce = wrap_dek(dek)
+                encrypted_content, content_nonce = encrypt_content(body.content, dek)
+                secret_id = await _insert_secret(
+                    conn, encrypted_content, content_nonce, body, owner_id
+                )
+                key_version = 1
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """
@@ -114,20 +136,61 @@ async def create_secret(
                         """,
                         (secret_id, wrapped_dek, dek_nonce),
                     )
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    INSERT INTO secret_versions(
+                        secret_id, version, payload_type, content, nonce,
+                        key_version, plaintext_size, created_by
+                    ) VALUES (%s, 1, 'text', %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        secret_id, encrypted_content, content_nonce, key_version,
+                        len(body.content.encode()), owner_id,
+                    ),
+                )
+                if body.allowed_emails is not None:
+                    await cur.executemany(
+                        "INSERT INTO secret_recipients(secret_id, email) VALUES (%s, %s)",
+                        [(secret_id, email) for email in body.allowed_emails],
+                    )
+                await cur.execute(
+                    """
+                    INSERT INTO secret_access_policies(
+                        secret_id, allowed_cidrs, allowed_countries,
+                        location_policy_mode, geoip_fail_closed
+                    ) VALUES (%s, %s::cidr[], %s::char(2)[], %s, %s)
+                    """,
+                    (
+                        secret_id, [str(value) for value in body.allowed_cidrs],
+                        body.allowed_countries, body.location_policy_mode,
+                        body.geoip_fail_closed,
+                    ),
+                )
+                await cur.execute(
+                    """
+                    INSERT INTO secret_tracking(secret_id, owner_id, retain_until)
+                    SELECT id, owner_id, expires_at + %s * INTERVAL '1 day'
+                    FROM secrets WHERE id = %s
+                    """,
+                    (settings.VIEW_HISTORY_RETENTION_DAYS, secret_id),
+                )
+
             signed_token = create_signed_token(UUID(secret_id), body.ttl_hours)
             async with conn.cursor() as cur:
                 await cur.execute(
                     "UPDATE secrets SET signed_token = %s WHERE id = %s",
                     (signed_token, secret_id),
                 )
-            # Audit inside the transaction so it rolls back on failure
             await audit_service.log(
-                "secret_created",
-                conn=conn,
-                actor_id=UUID(owner_id) if owner_id else None,
-                actor_ip=request.state.client_ip,
-                secret_id=UUID(secret_id),
+                "secret_created", conn=conn, actor_id=UUID(owner_id),
+                actor_ip=request.state.client_ip, secret_id=UUID(secret_id),
             )
+    except Exception:
+        await quota_service.release(reservation)
+        raise
+    await quota_service.commit(reservation)
+
     share_url = f"{settings.BASE_URL}/api/secrets/{secret_id}?token={signed_token}"
     # Schedule Redis expiry sentinel - non-critical, swallow errors gracefully
     try:
@@ -136,8 +199,7 @@ async def create_secret(
         pass
     qr = generate_qr_code(share_url)
     # Fetch expires_at that was computed by the DB trigger
-    async with get_pool().connection() as conn:
-        async with conn.cursor() as cur:
+    async with get_pool().connection() as conn, conn.cursor() as cur:
             await cur.execute("SELECT expires_at FROM secrets WHERE id = %s", (secret_id,))
             row = await cur.fetchone()
     expires_at = row[0] if row else None
@@ -169,13 +231,12 @@ async def _retrieve_secret(
       5. Increment view_count - the DB trigger deletes the row if max_views is reached.
       6. Emit audit log + optional notification.
     """
-    if token:
-        verified_id = verify_signed_token(token)
-        try:
-            if UUID(verified_id) != UUID(secret_id):
-                raise HTTPException(status.HTTP_403_FORBIDDEN, "Share token does not match this secret")
-        except ValueError as exc:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid share token") from exc
+    try:
+        policy_version = await location_policy_service.authorize(
+            UUID(secret_id), token, request.state.client_ip
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Invalid share token") from exc
     pool = get_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
@@ -183,9 +244,10 @@ async def _retrieve_secret(
                 """
                 SELECT id, content, nonce, password_protected, access_password_hash,
                        view_count, max_views, expires_at, created_at,
-                       notify_on_view, notify_email, webhook_url
-                FROM secrets
-                WHERE id = %s
+                       notify_on_view, notify_email, webhook_url, email_restricted,
+                       current_version, payload_type, p.policy_version
+                FROM secrets s JOIN secret_access_policies p ON p.secret_id = s.id
+                WHERE s.id = %s FOR UPDATE OF s
                 """,
                 (secret_id,),
             )
@@ -198,12 +260,45 @@ async def _retrieve_secret(
             pw_protected, pw_hash,
             view_count, max_views,
             expires_at, created_at,
-            notify_on_view, notify_email, webhook_url,
+            notify_on_view, notify_email, webhook_url, email_restricted,
+            current_version, payload_type, locked_policy_version,
         ) = row
+        if locked_policy_version != policy_version:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Share token policy is no longer current")
         if expires_at < datetime.now(timezone.utc):
             raise HTTPException(status.HTTP_410_GONE, "Secret has expired")
         if view_count >= max_views:
             raise HTTPException(status.HTTP_410_GONE, "Secret has reached its maximum view count")
+        if payload_type != "text":
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This secret contains a file; use the file download endpoint",
+            )
+        if email_restricted:
+            if not current_user:
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED,
+                    "Log in with a verified recipient email to access this secret",
+                )
+            if not current_user["is_verified"]:
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    "Verify your email before accessing this secret",
+                )
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT 1 FROM secret_recipients
+                    WHERE secret_id = %s AND email = %s
+                    """,
+                    (secret_id, current_user["email"]),
+                )
+                if not await cur.fetchone():
+                    raise HTTPException(
+                        status.HTTP_403_FORBIDDEN,
+                        "Your email is not allowed to access this secret",
+                    )
+
         if pw_protected:
             if not access_password:
                 raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Password required")
@@ -238,8 +333,31 @@ async def _retrieve_secret(
             raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "Failed to decrypt secret") from exc
         new_view_count       = view_count + 1
         is_now_fully_viewed  = new_view_count >= max_views
+        async with conn.cursor() as cur:
+            await cur.execute(
+                """
+                INSERT INTO secret_views(
+                    secret_id, viewer_id, viewer_email, email_verified, content_version
+                )
+                SELECT secret_id, %s, %s, %s, %s
+                FROM secret_tracking WHERE secret_id = %s
+                """,
+                (
+                    current_user["id"] if current_user else None,
+                    current_user["email"] if current_user else None,
+                    current_user["is_verified"] if current_user else False,
+                    current_version,
+                    secret_id,
+                ),
+            )
+            if email_restricted and cur.rowcount != 1:
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "Unable to record secret access",
+                )
         await audit_service.log(
             "secret_viewed",
+            conn=conn,
             actor_id=UUID(current_user["id"]) if current_user else None,
             actor_ip=request.state.client_ip,
             secret_id=UUID(secret_id),
@@ -262,6 +380,7 @@ async def _retrieve_secret(
         expires_at=expires_at,
         views_remaining=max(0, max_views - new_view_count),
         client_encrypted=client_encrypted,
+        version=current_version,
     )
 
 # Retrieve – programmatic (POST, password in body)
@@ -279,7 +398,12 @@ async def get_secret(
     current_user: Optional[dict] = Depends(get_current_user_optional),
 ):
     return await _retrieve_secret(
-        secret_id, body.access_password, token, request, background_tasks, current_user
+        secret_id,
+        body.access_password,
+        token or body.signed_token,
+        request,
+        background_tasks,
+        current_user,
     )
 
 
@@ -310,9 +434,12 @@ async def secret_info(secret_id: str):
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT created_at, expires_at, password_protected,
-                       viewed, view_count, max_views
-                FROM secrets WHERE id = %s
+                SELECT s.created_at, s.expires_at, s.password_protected,
+                       s.viewed, s.view_count, s.max_views, s.current_version, s.payload_type,
+                       cardinality(p.allowed_cidrs) > 0 OR cardinality(p.allowed_countries) > 0,
+                       p.policy_version
+                FROM secrets s JOIN secret_access_policies p ON p.secret_id = s.id
+                WHERE s.id = %s
                 """,
                 (secret_id,),
             )
@@ -327,6 +454,10 @@ async def secret_info(secret_id: str):
         viewed=row[3],
         view_count=row[4],
         max_views=row[5],
+        current_version=row[6],
+        payload_type=row[7],
+        location_restricted=row[8],
+        policy_version=row[9],
     )
 
 
@@ -413,6 +544,10 @@ async def delete_secret(
                 await cur.execute("DELETE FROM secrets WHERE id = %s", (secret_id,))
                 if cur.rowcount == 0:
                     raise HTTPException(status.HTTP_404_NOT_FOUND, "Secret not found")
+    try:
+        await quota_service.reconcile_user(current_user["id"])
+    except Exception:
+        pass
 
 # Key rotation
 @router.post(
@@ -485,3 +620,19 @@ async def secret_view_page(secret_id: str, token: Optional[str] = Query(default=
 </body>
 </html>"""
     return responses.HTMLResponse(content=html)
+
+
+from app.routers import secret_access, secret_versions, secret_views
+
+# Feature routers keep versioning and location-policy changes independently
+# reviewable while preserving the public /api/secrets paths.
+router.include_router(secret_versions.router)
+router.include_router(secret_access.router)
+router.include_router(secret_views.router)
+
+# Compatibility exports for callers that imported handlers from this module.
+update_secret = secret_versions.update_secret
+list_secret_versions = secret_versions.list_secret_versions
+restore_secret_version = secret_versions.restore_secret_version
+update_location_policy = secret_access.update_location_policy
+secret_views = secret_views.secret_views
