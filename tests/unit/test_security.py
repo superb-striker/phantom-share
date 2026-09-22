@@ -1,10 +1,10 @@
 import time
-import uuid
 
 import pytest
 from fastapi import HTTPException
 
-import app.core.security as security
+from app.core import security
+
 
 class _FakeCursor:
     def __init__(self, fetchone_result):
@@ -117,6 +117,14 @@ class TestSignedShareToken:
         token = security.create_signed_token(self.SECRET_ID, expires_in_hours=1)
         assert security.verify_signed_token(token) == self.SECRET_ID
 
+    def test_policy_version_invalidates_old_token(self):
+        token = security.create_signed_token(
+            self.SECRET_ID, expires_in_hours=1, policy_version=2
+        )
+        assert security.verify_signed_token(token, 2) == self.SECRET_ID
+        with pytest.raises(HTTPException, match="policy"):
+            security.verify_signed_token(token, 3)
+
     def test_expired_token_rejected(self):
         token = security.create_signed_token(self.SECRET_ID, expires_in_hours=0)
         time.sleep(1.1)
@@ -178,13 +186,13 @@ class TestGetCurrentUser:
     @pytest.mark.asyncio
     async def test_valid_token_and_active_session_returns_user(self, monkeypatch):
         token = security.create_access_token("user-123", "user", "session-abc")
-        fake_row = ("user-123", "a@b.com", "alice", "user", True)
+        fake_row = ("user-123", "a@b.com", "alice", "user", True, True)
         monkeypatch.setattr(security, "get_pool", lambda: _FakePool(fake_row))
 
         user = await security.get_current_user(credentials=_FakeCredentials(token))
         assert user == {
             "id": "user-123", "email": "a@b.com", "username": "alice",
-            "role": "user", "is_active": True,
+            "role": "user", "is_active": True, "is_verified": True,
         }
 
     @pytest.mark.asyncio
@@ -198,7 +206,7 @@ class TestGetCurrentUser:
     @pytest.mark.asyncio
     async def test_inactive_user_rejected_even_with_valid_session_row(self, monkeypatch):
         token = security.create_access_token("user-123", "user", "session-abc")
-        fake_row = ("user-123", "a@b.com", "alice", "user", False)  # is_active=False
+        fake_row = ("user-123", "a@b.com", "alice", "user", False, False)
         monkeypatch.setattr(security, "get_pool", lambda: _FakePool(fake_row))
         with pytest.raises(HTTPException) as exc_info:
             await security.get_current_user(credentials=_FakeCredentials(token))
