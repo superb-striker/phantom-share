@@ -1,12 +1,14 @@
 import os
 import pathlib
+import shutil
+import subprocess
+
 import pytest
 import pytest_asyncio
+from psycopg_pool import AsyncConnectionPool
+from redis.asyncio import Redis as AsyncRedis
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.community.redis import RedisContainer
-from redis.asyncio import Redis as AsyncRedis
-from psycopg_pool import AsyncConnectionPool
-
 
 os.environ.setdefault("APP_NAME", "Phantom Share Test")
 os.environ.setdefault("APP_VERSION", "test")
@@ -46,7 +48,20 @@ async def redis_client(redis_container):
     await client.aclose()
 
 
-_SETUP_SQL_PATH = pathlib.Path(__file__).resolve().parent.parent / "database" / "setup.sql"
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+
+def run_migrations(database_url, command="up"):
+    if not shutil.which("dbmate"):
+        pytest.fail("dbmate is required for database tests; see README.md")
+    migration_env = os.environ.copy()
+    migration_env["DATABASE_URL"] = database_url
+    subprocess.run(
+        ["dbmate", "--env-file", "/dev/null", "--migrations-dir",
+         str(_PROJECT_ROOT / "database" / "migrations"),
+         "--no-dump-schema", command],
+        env=migration_env, check=True, capture_output=True, text=True,
+    )
 
 @pytest.fixture(scope="session")
 def postgres_container():
@@ -58,14 +73,16 @@ async def db_pool(postgres_container):
     conninfo = postgres_container.get_connection_url().replace("postgresql+psycopg2", "postgresql")
     pool = AsyncConnectionPool(conninfo, min_size=1, max_size=5, open=False)
     await pool.open()
-    schema_sql = _SETUP_SQL_PATH.read_text()
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(schema_sql)
+    run_migrations(conninfo + "?sslmode=disable")
     yield pool
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
+    async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
-                "TRUNCATE secrets, sessions, users, secret_keys, audit_logs RESTART IDENTITY CASCADE"
+                """
+                TRUNCATE secrets, sessions, users, secret_keys, audit_logs,
+                         secret_tracking, secret_views, email_verifications,
+                         secret_versions, user_quotas, pending_uploads,
+                         object_deletion_outbox, secret_access_policies
+                RESTART IDENTITY CASCADE
+                """
             )
     await pool.close()
