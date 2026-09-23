@@ -78,7 +78,7 @@ async def update_secret(
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT owner_id, current_version, expires_at
+                SELECT owner_id, current_version, payload_type, expires_at
                 FROM secrets WHERE id = %s FOR UPDATE
                 """,
                 (secret_id,),
@@ -200,7 +200,7 @@ async def restore_secret_version(
                 raise HTTPException(status.HTTP_409_CONFLICT, "Maximum versions reached")
             await cur.execute(
                 """
-                SELECT content, nonce, key_version
+                SELECT payload_type, content, nonce, key_version
                 FROM secret_versions WHERE secret_id = %s AND version = %s
                 """,
                 (secret_id, version),

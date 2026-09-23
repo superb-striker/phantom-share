@@ -286,7 +286,7 @@ async def download_file_secret(
                 """,
                 (secret_id, secret[3]),
             )
-            row = cur.fetchone()
+            row = await cur.fetchone()
             if not row:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, "Did not find a file for provided secret id and version")
             object_key = row[0]
