@@ -85,8 +85,11 @@ async def authorize(secret_id: UUID, token: str | None, client_ip: str) -> int:
         row = await cur.fetchone()
     if not row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Secret not found")
-    if token and UUID(verify_signed_token(token, row[5])) != secret_id:
-            raise HTTPException(status.HTTP_403_FORBIDDEN, "Share token does not match this secret")
+    if token and UUID(verify_signed_token(token, row[4])) != secret_id:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            "Share token does not match this secret",
+        )
     allowed, country, reason = evaluate(
         client_ip, list(row[0]), [value.strip() for value in row[1]],
         row[2], row[3],
