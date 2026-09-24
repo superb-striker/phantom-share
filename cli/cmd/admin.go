@@ -7,7 +7,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/superb-striker/phantom-share/phantom/internal/api"
 	"github.com/superb-striker/phantom-share/phantom/internal/config"
 	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
@@ -16,7 +15,6 @@ var adminCmd = &cobra.Command{
 	Use:   "admin",
 	Short: "Admin-only operations (requires admin role)",
 }
-
 
 var adminUsersCmd = &cobra.Command{
 	Use:   "users",
@@ -30,7 +28,7 @@ var adminUsersCmd = &cobra.Command{
 		page, _ := cmd.Flags().GetInt("page")
 		pageSize, _ := cmd.Flags().GetInt("page-size")
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		resp, err := client.ListUsers(page, pageSize)
 		if err != nil {
 			return err
@@ -51,7 +49,7 @@ var adminUsersCmd = &cobra.Command{
 				deleteAfter = output.FormatTime(*u.DeleteAfter)
 			}
 			t.Append([]string{
-				u.ID[:8] + "…",
+				shortID(u.ID),
 				u.Username,
 				u.Email,
 				output.RoleColor(u.Role),
@@ -73,7 +71,7 @@ var adminCleanupCmd = &cobra.Command{
 		if err := config.RequireAuth(); err != nil {
 			return err
 		}
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		result, err := client.AdminCleanup()
 		if err != nil {
 			return err
@@ -104,7 +102,7 @@ var adminRoleCmd = &cobra.Command{
 			return fmt.Errorf("invalid role %q – must be admin, user, or readonly", role)
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		updated, err := client.ChangeRole(userID, role)
 		if err != nil {
 			return err
@@ -118,8 +116,8 @@ var adminRoleCmd = &cobra.Command{
 }
 
 var adminToggleCmd = &cobra.Command{
-	Use:   "toggle <user-id>",
-	Short: "Toggle a user's active/inactive status",
+	Use:     "toggle <user-id>",
+	Short:   "Toggle a user's active/inactive status",
 	Example: `  phantom admin toggle <uuid>`,
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -127,15 +125,15 @@ var adminToggleCmd = &cobra.Command{
 			return err
 		}
 		userID := args[0]
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		result, err := client.ToggleActivation(userID)
 		if err != nil {
 			return err
 		}
 		if result.IsActive {
-			output.Success("User %s is now %s.", userID[:8]+"…", color.GreenString("active"))
+			output.Success("User %s is now %s.", shortID(userID), color.GreenString("active"))
 		} else {
-			output.Warn("User %s is now %s.", userID[:8]+"…", color.RedString("inactive"))
+			output.Warn("User %s is now %s.", shortID(userID), color.RedString("inactive"))
 			if result.DeleteAfter != nil {
 				output.Field("Scheduled deletion", output.FormatTime(*result.DeleteAfter))
 			}

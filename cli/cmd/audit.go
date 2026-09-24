@@ -6,7 +6,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/superb-striker/phantom-share/phantom/internal/api"
 	"github.com/superb-striker/phantom-share/phantom/internal/config"
 	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
@@ -36,7 +35,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 			secretID, _ = parseShareURL(args[0])
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		resp, err := client.AuditLogs(page, pageSize, action, severity, actorID, secretID)
 		if err != nil {
 			return err
@@ -44,7 +43,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 
 		title := fmt.Sprintf("Audit log  (page %d, total %d)", resp.Page, resp.Total)
 		if secretID != "" {
-			title = fmt.Sprintf("Audit log for %s…  (total %d)", secretID[:8], resp.Total)
+			title = fmt.Sprintf("Audit log for %s  (total %d)", shortID(secretID), resp.Total)
 		}
 		output.Header(title)
 		fmt.Println()
@@ -58,7 +57,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 		for _, item := range resp.Items {
 			actorStr := "—"
 			if item.ActorID != nil {
-				actorStr = (*item.ActorID)[:8] + "…"
+				actorStr = shortID(*item.ActorID)
 			}
 			ipStr := "—"
 			if item.ActorIP != nil {
@@ -66,12 +65,7 @@ are filtered to that specific secret. Admins can omit the URL to see all events.
 			}
 			secretStr := "—"
 			if item.SecretID != nil {
-				s := *item.SecretID
-				if len(s) > 8 {
-					secretStr = s[:8] + "…"
-				} else {
-					secretStr = s
-				}
+				secretStr = shortID(*item.SecretID)
 			}
 			t.Append([]string{
 				fmt.Sprintf("%d", item.ID),
@@ -99,23 +93,24 @@ func init() {
 	auditCmd.Flags().Int("page-size", 50, "Results per page (max 200)")
 	auditCmd.Flags().String("action", "", "Filter by action (e.g. secret_created, secret_viewed, user_login)")
 	auditCmd.Flags().String("actor-id", "", "Filter by actor UUID")
+	auditCmd.Flags().String("severity", "", "Filter by severity (info, warning, or critical)")
 }
 
 // formatAction colour-codes the action string for readability.
 func formatAction(action string) string {
 	switch action {
 	case "secret_created":
-		return "\033[32m" + action + "\033[0m"  // green
+		return "\033[32m" + action + "\033[0m" // green
 	case "secret_viewed":
-		return "\033[33m" + action + "\033[0m"  // yellow
+		return "\033[33m" + action + "\033[0m" // yellow
 	case "secret_deleted":
-		return "\033[31m" + action + "\033[0m"  // red
+		return "\033[31m" + action + "\033[0m" // red
 	case "key_rotated":
-		return "\033[35m" + action + "\033[0m"  // magenta
+		return "\033[35m" + action + "\033[0m" // magenta
 	case "user_login", "user_registered":
-		return "\033[36m" + action + "\033[0m"  // cyan
+		return "\033[36m" + action + "\033[0m" // cyan
 	case "user_logout":
-		return "\033[90m" + action + "\033[0m"  // gray
+		return "\033[90m" + action + "\033[0m" // gray
 	default:
 		return action
 	}

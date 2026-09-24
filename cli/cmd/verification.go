@@ -3,7 +3,6 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/superb-striker/phantom-share/phantom/internal/api"
 	"github.com/superb-striker/phantom-share/phantom/internal/config"
 	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
@@ -16,7 +15,7 @@ var requestVerificationCmd = &cobra.Command{
 		if err := config.RequireAuth(); err != nil {
 			return err
 		}
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		if err := client.RequestEmailVerification(); err != nil {
 			return err
 		}
@@ -33,8 +32,8 @@ var verifyEmailCmd = &cobra.Command{
 		if err := config.RequireAuth(); err != nil {
 			return err
 		}
-		code := promptPassword("Verification code")
-		client := api.New(config.BaseURL(), config.AccessToken())
+		code := promptSecret("Verification code")
+		client := newAPIClient()
 		if err := client.ConfirmEmailVerification(code); err != nil {
 			return err
 		}

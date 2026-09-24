@@ -20,6 +20,11 @@ var authCmd = &cobra.Command{
 	Short: "Authenticate with the Phantom API",
 }
 
+var (
+	promptText   = prompt
+	promptSecret = promptPassword
+)
+
 var authLoginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Log in and save credentials to ~/.phantom/config.yaml",
@@ -33,8 +38,8 @@ var authLoginCmd = &cobra.Command{
 
 		output.Header("Log in to Phantom")
 
-		email := prompt("Email")
-		password := promptPassword("Password")
+		email := promptText("Email")
+		password := promptSecret("Password")
 		if email == "" || password == "" {
 			return fmt.Errorf("email and password are required")
 		}
@@ -75,10 +80,10 @@ var authRegisterCmd = &cobra.Command{
 
 		output.Header("Create a Phantom account")
 
-		email := prompt("Email")
-		username := prompt("Username")
-		password := promptPassword("Password")
-		confirm := promptPassword("Confirm password")
+		email := promptText("Email")
+		username := promptText("Username")
+		password := promptSecret("Password")
+		confirm := promptSecret("Confirm password")
 
 		if password != confirm {
 			return fmt.Errorf("passwords do not match")
@@ -107,7 +112,7 @@ var authLogoutCmd = &cobra.Command{
 			return nil
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		if rt := config.RefreshToken(); rt != "" {
 			if err := client.Logout(rt); err != nil {
 				output.Warn("Server-side logout failed (%v); clearing local credentials anyway.", err)
@@ -133,7 +138,7 @@ var authWhoamiCmd = &cobra.Command{
 			return err
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		user, err := client.Me()
 		if err != nil {
 			return err

@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,7 +23,14 @@ type Client struct {
 	BaseURL     string
 	AccessToken string
 	http        *http.Client
+
+	refreshMu     sync.Mutex
+	refreshToken  string
+	persistTokens func(*TokenResponse) error
+	clearTokens   func() error
 }
+
+var ErrSessionExpired = errors.New("session expired – run: phantom auth login")
 
 func New(baseURL, accessToken string) *Client {
 	return &Client{
@@ -30,32 +40,54 @@ func New(baseURL, accessToken string) *Client {
 	}
 }
 
+// EnableAutoRefresh configures transparent access-token renewal. The callbacks
+// keep token persistence outside the HTTP package while ensuring rotated tokens
+// are durable before the original request is retried.
+func (c *Client) EnableAutoRefresh(
+	refreshToken string,
+	persist func(*TokenResponse) error,
+	clear func() error,
+) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	c.refreshToken = refreshToken
+	c.persistTokens = persist
+	c.clearTokens = clear
+}
+
 // internal request helper
 
 func (c *Client) do(method, path string, body any, out any) error {
-	var bodyReader io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		bodyReader = bytes.NewReader(b)
-	}
+	return c.doWithBody(method, path, func() any { return body }, out)
+}
 
-	req, err := http.NewRequest(method, c.BaseURL+path, bodyReader)
+func (c *Client) doWithBody(
+	method string,
+	path string,
+	body func() any,
+	out any,
+) error {
+	resp, err := c.send(func() (*http.Request, error) {
+		value := body()
+		var bodyReader io.Reader
+		if value != nil {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			bodyReader = bytes.NewReader(encoded)
+		}
+		req, err := http.NewRequest(method, c.BaseURL+path, bodyReader)
+		if err != nil {
+			return nil, err
+		}
+		if value != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		return req, nil
+	})
 	if err != nil {
 		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-	}
-
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("connection failed – is the API reachable at %s? (%w)", c.BaseURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -74,6 +106,142 @@ func (c *Client) do(method, path string, body any, out any) error {
 		}
 	}
 	return nil
+}
+
+func (c *Client) send(build func() (*http.Request, error)) (*http.Response, error) {
+	accessToken := c.accessTokenSnapshot()
+	if c.autoRefreshEnabled() && tokenExpiresSoon(accessToken, time.Now().Add(time.Minute)) {
+		if err := c.refreshAccessToken(accessToken); err != nil {
+			return nil, err
+		}
+		accessToken = c.accessTokenSnapshot()
+	}
+
+	resp, err := c.sendOnce(build, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized ||
+		!isBearerChallenge(resp) ||
+		!c.autoRefreshEnabled() {
+		return resp, nil
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if err := c.refreshAccessToken(accessToken); err != nil {
+		return nil, err
+	}
+	return c.sendOnce(build, c.accessTokenSnapshot())
+}
+
+func isBearerChallenge(resp *http.Response) bool {
+	for _, challenge := range resp.Header.Values("WWW-Authenticate") {
+		fields := strings.Fields(challenge)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "Bearer") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) sendOnce(
+	build func() (*http.Request, error),
+	accessToken string,
+) (*http.Response, error) {
+	req, err := build()
+	if err != nil {
+		return nil, err
+	}
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"connection failed – is the API reachable at %s? (%w)",
+			c.BaseURL,
+			err,
+		)
+	}
+	return resp, nil
+}
+
+func (c *Client) autoRefreshEnabled() bool {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.refreshToken != "" && c.persistTokens != nil
+}
+
+func (c *Client) accessTokenSnapshot() string {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.AccessToken
+}
+
+func (c *Client) refreshAccessToken(failedToken string) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	// Another request may already have refreshed while this one waited.
+	if c.AccessToken != failedToken && !tokenExpiresSoon(c.AccessToken, time.Now().Add(time.Minute)) {
+		return nil
+	}
+	refreshToken := c.refreshToken
+	if refreshToken == "" {
+		return ErrSessionExpired
+	}
+
+	refreshClient := New(c.BaseURL, "")
+	refreshClient.http = c.http
+	tokens, err := refreshClient.Refresh(refreshToken)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusBadRequest ||
+			apiErr.StatusCode == http.StatusUnauthorized) {
+			if c.clearTokens != nil {
+				_ = c.clearTokens()
+			}
+			c.AccessToken = ""
+			c.refreshToken = ""
+			return ErrSessionExpired
+		}
+		return fmt.Errorf("could not refresh session: %w", err)
+	}
+
+	// The server has revoked the old refresh token. Persist the rotated pair
+	// before retrying so a crash cannot leave a stale token on disk.
+	if err := c.persistTokens(tokens); err != nil {
+		if c.clearTokens != nil {
+			_ = c.clearTokens()
+		}
+		c.AccessToken = ""
+		c.refreshToken = ""
+		return fmt.Errorf(
+			"session refreshed but saving credentials failed; log in again: %w",
+			err,
+		)
+	}
+	c.AccessToken = tokens.AccessToken
+	c.refreshToken = tokens.RefreshToken
+	return nil
+}
+
+func tokenExpiresSoon(token string, deadline time.Time) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return false
+	}
+	var claims struct {
+		ExpiresAt int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.ExpiresAt == 0 {
+		return false
+	}
+	return !time.Unix(claims.ExpiresAt, 0).After(deadline)
 }
 
 // APIError retains structured conflict details returned by the backend.
@@ -366,8 +534,13 @@ func (c *Client) Refresh(refreshToken string) (*TokenResponse, error) {
 }
 
 func (c *Client) Logout(refreshToken string) error {
-	return c.do("POST", "/api/auth/logout", map[string]string{
-		"refresh_token": refreshToken,
+	return c.doWithBody("POST", "/api/auth/logout", func() any {
+		c.refreshMu.Lock()
+		defer c.refreshMu.Unlock()
+		if c.refreshToken != "" {
+			refreshToken = c.refreshToken
+		}
+		return map[string]string{"refresh_token": refreshToken}
 	}, nil)
 }
 
@@ -438,16 +611,11 @@ func (c *Client) DownloadFile(secretID, password, token string) (*http.Response,
 	if encoded := q.Encode(); encoded != "" {
 		path += "?" + encoded
 	}
-	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+	resp, err := c.send(func() (*http.Request, error) {
+		return http.NewRequest("GET", c.BaseURL+path, nil)
+	})
 	if err != nil {
 		return nil, err
-	}
-	if c.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("connection failed – is the API reachable at %s? (%w)", c.BaseURL, err)
 	}
 	if resp.StatusCode >= 400 {
 		defer resp.Body.Close()
@@ -508,9 +676,37 @@ func (c *Client) UpdateUserQuota(userID string, req QuotaUpdateRequest) (*QuotaR
 }
 
 func (c *Client) multipartUpload(method, path, filePath string, fields map[string][]string, out any) error {
+	resp, err := c.send(func() (*http.Request, error) {
+		return c.multipartRequest(method, path, filePath, fields)
+	})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return decodeAPIError(resp.StatusCode, body)
+	}
+	if out != nil && len(body) > 0 {
+		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("failed to parse response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c *Client) multipartRequest(
+	method string,
+	path string,
+	filePath string,
+	fields map[string][]string,
+) (*http.Request, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
-		return fmt.Errorf("cannot open file %q: %w", filePath, err)
+		return nil, fmt.Errorf("cannot open file %q: %w", filePath, err)
 	}
 	pipeReader, pipeWriter := io.Pipe()
 	writer := multipart.NewWriter(pipeWriter)
@@ -544,30 +740,10 @@ func (c *Client) multipartUpload(method, path, filePath string, fields map[strin
 	req, err := http.NewRequest(method, c.BaseURL+path, pipeReader)
 	if err != nil {
 		pipeReader.Close()
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", writer.FormDataContentType())
-	if c.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+c.AccessToken)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("connection failed – is the API reachable at %s? (%w)", c.BaseURL, err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode >= 400 {
-		return decodeAPIError(resp.StatusCode, body)
-	}
-	if out != nil && len(body) > 0 {
-		if err := json.Unmarshal(body, out); err != nil {
-			return fmt.Errorf("failed to parse response: %w", err)
-		}
-	}
-	return nil
+	return req, nil
 }
 
 func (c *Client) ListSecrets(page, pageSize int, viewed, expired *bool) (*SecretListResponse, error) {
