@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/superb-striker/phantom-share/phantom/internal/api"
 	"github.com/superb-striker/phantom-share/phantom/internal/config"
 	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
@@ -23,7 +22,7 @@ var viewsCmd = &cobra.Command{
 		secretID, _ := parseShareURL(args[0])
 		page, _ := cmd.Flags().GetInt("page")
 		pageSize, _ := cmd.Flags().GetInt("page-size")
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		resp, err := client.SecretViews(secretID, page, pageSize)
 		if err != nil {
 			return err
@@ -36,7 +35,7 @@ var viewsCmd = &cobra.Command{
 			return nil
 		}
 
-		table := output.NewTable(os.Stdout, []string{"EMAIL", "VERIFIED", "VIEWED AT (UTC)"})
+		table := output.NewTable(os.Stdout, []string{"EMAIL", "VERIFIED", "VERSION", "VIEWED AT (UTC)"})
 		for _, view := range resp.Items {
 			email := "anonymous"
 			if view.ViewerEmail != nil {
@@ -45,6 +44,7 @@ var viewsCmd = &cobra.Command{
 			table.Append([]string{
 				email,
 				output.BoolIcon(view.EmailVerified),
+				optionalInt(view.ContentVersion),
 				view.ViewedAt.UTC().Format(time.RFC3339Nano),
 			})
 		}
@@ -54,6 +54,13 @@ var viewsCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+func optionalInt(value *int) string {
+	if value == nil {
+		return "—"
+	}
+	return fmt.Sprintf("%d", *value)
 }
 
 func init() {
