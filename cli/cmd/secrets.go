@@ -2,8 +2,11 @@ package cmd
 
 import (
 	"fmt"
+	"io"
+	"mime"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -19,8 +22,8 @@ import (
 var shareCmd = &cobra.Command{
 	Use:   "share [secret]",
 	Short: "Create a new secret and print a shareable link",
-	Long: `Encrypt a secret and store it server-side. Prints a one-time share URL.
-Auth is optional – unauthenticated secrets are still encrypted.`,
+	Long: `Encrypt a text secret or virus-scan and encrypt a file, then print a share URL.
+Authentication is required. Restricted secrets require recipients to log in and verify their email.`,
 	Example: `  phantom share "postgres://user:pass@host/db"
   phantom share "my secret" --expires 12h --max-views 3
   phantom share -f ./secret.env --expires 1h --burn-after-read
@@ -33,19 +36,38 @@ Auth is optional – unauthenticated secrets are still encrypted.`,
 		password, _ := cmd.Flags().GetString("password")
 		notify, _ := cmd.Flags().GetString("notify")
 		webhook, _ := cmd.Flags().GetString("webhook")
+		allowedEmails, _ := cmd.Flags().GetStringArray("allow-email")
+		allowedCIDRs, _ := cmd.Flags().GetStringArray("allow-cidr")
+		allowedCountries, _ := cmd.Flags().GetStringArray("allow-country")
+		locationMode, _ := cmd.Flags().GetString("location-mode")
+		geoIPFailClosed, _ := cmd.Flags().GetBool("geoip-fail-closed")
+		changeNote, _ := cmd.Flags().GetString("note")
+		clientEncrypted, _ := cmd.Flags().GetBool("client-encrypted")
+		clientNonce, _ := cmd.Flags().GetString("client-nonce")
+		if err := config.RequireAuth(); err != nil {
+			return err
+		}
+		if locationMode != "all" && locationMode != "any" {
+			return fmt.Errorf("--location-mode must be all or any")
+		}
 
-		// -- resolve content
+		if filePath != "" && len(args) > 0 {
+			return fmt.Errorf("provide either a secret argument or --file, not both")
+		}
+		if filePath != "" && (clientEncrypted || clientNonce != "") {
+			return fmt.Errorf("--client-encrypted and --client-nonce apply only to text secrets")
+		}
+		if clientEncrypted && clientNonce == "" {
+			return fmt.Errorf("--client-nonce is required with --client-encrypted")
+		}
+		if !clientEncrypted && clientNonce != "" {
+			return fmt.Errorf("--client-encrypted is required with --client-nonce")
+		}
+
 		var content string
-		if filePath != "" {
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				return fmt.Errorf("cannot read file %q: %w", filePath, err)
-			}
-			content = string(data)
-			output.Info("Read %d bytes from %s", len(data), filePath)
-		} else if len(args) > 0 {
+		if filePath == "" && len(args) > 0 {
 			content = strings.Join(args, " ")
-		} else {
+		} else if filePath == "" {
 			return fmt.Errorf("provide a secret string as an argument or use -f <file>")
 		}
 
@@ -57,19 +79,50 @@ Auth is optional – unauthenticated secrets are still encrypted.`,
 		if burn {
 			maxViews = 1
 		}
-
-		req := api.SecretCreateRequest{
-			Content:           content,
-			TTLHours:          ttlHours,
-			MaxViews:          maxViews,
-			PasswordProtected: password != "",
-			AccessPassword:    password,
-			NotifyOnView:      notify != "",
-			NotifyEmail:       notify,
-			WebhookURL:        webhook,
+		client := newAPIClient()
+		if filePath != "" {
+			if notify != "" || webhook != "" {
+				return fmt.Errorf("file secrets do not support --notify or --webhook")
+			}
+			resp, err := client.CreateFileSecret(api.FileCreateRequest{
+				FilePath: filePath, TTLHours: ttlHours, MaxViews: maxViews,
+				AccessPassword: password, AllowedEmails: allowedEmails,
+				ChangeNote: changeNote, AllowedCIDRs: allowedCIDRs,
+				AllowedCountries: allowedCountries, LocationPolicyMode: locationMode,
+				GeoIPFailClosed: geoIPFailClosed,
+			})
+			if err != nil {
+				return err
+			}
+			output.Header("File secret created")
+			output.Field("ID", resp.SecretID)
+			output.FieldHighlight("Share URL", resp.ShareURL)
+			output.Field("Version", strconv.Itoa(resp.Version))
+			output.Field("File size", formatBytes(resp.Size))
+			fmt.Println()
+			color.New(color.FgHiWhite, color.Bold).Println(resp.ShareURL)
+			fmt.Println()
+			return nil
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		req := api.SecretCreateRequest{
+			AllowedEmails:      allowedEmails,
+			AllowedCIDRs:       allowedCIDRs,
+			AllowedCountries:   allowedCountries,
+			LocationPolicyMode: locationMode,
+			GeoIPFailClosed:    geoIPFailClosed,
+			Content:            content,
+			TTLHours:           ttlHours,
+			MaxViews:           maxViews,
+			PasswordProtected:  password != "",
+			AccessPassword:     password,
+			NotifyOnView:       notify != "",
+			NotifyEmail:        notify,
+			WebhookURL:         webhook,
+			ClientEncrypted:    clientEncrypted,
+			ClientNonce:        clientNonce,
+		}
+
 		resp, err := client.CreateSecret(req)
 		if err != nil {
 			return err
@@ -81,6 +134,17 @@ Auth is optional – unauthenticated secrets are still encrypted.`,
 		output.Field("Expires at", output.FormatTime(resp.ExpiresAt))
 		output.Field("Expires in", output.FormatDuration(resp.ExpiresAt))
 		output.Field("Max views", strconv.Itoa(maxViews))
+		if len(allowedEmails) > 0 {
+			output.Field("Allowed emails", strings.Join(allowedEmails, ", "))
+			output.Info("Recipients must log in and verify their email. Max views is shared across all recipients.")
+		}
+		if len(allowedCIDRs) > 0 {
+			output.Field("Allowed CIDRs", strings.Join(allowedCIDRs, ", "))
+		}
+		if len(allowedCountries) > 0 {
+			output.Field("Allowed countries", strings.Join(allowedCountries, ", "))
+			output.Field("Location mode", locationMode)
+		}
 		if password != "" {
 			output.Field("Password protected", output.BoolIcon(true))
 		}
@@ -110,9 +174,22 @@ var getCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		password, _ := cmd.Flags().GetString("password")
 		raw, _ := cmd.Flags().GetBool("raw")
+		destination, _ := cmd.Flags().GetString("output")
 
-		secretID, token := parseShareURL(args[0])
-		client := api.New(config.BaseURL(), config.AccessToken())
+		secretID, token, fileHint := parseShareRef(args[0])
+		client := newAPIClient()
+		if !fileHint {
+			info, err := client.SecretInfo(secretID)
+			if err == nil {
+				fileHint = info.PayloadType == "file"
+			}
+		}
+		if fileHint {
+			return retrieveFile(client, secretID, password, token, destination, raw)
+		}
+		if destination != "" {
+			return fmt.Errorf("--output is only valid for file secrets")
+		}
 		content, err := client.GetSecret(secretID, password, token)
 		if err != nil {
 			return err
@@ -127,6 +204,7 @@ var getCmd = &cobra.Command{
 		output.SecretBox(content.Content)
 		output.Field("Created at", output.FormatTime(content.CreatedAt))
 		output.Field("Expires at", output.FormatTime(content.ExpiresAt))
+		output.Field("Version", strconv.Itoa(content.Version))
 		if content.ViewsRemaining != nil {
 			rem := *content.ViewsRemaining
 			if rem == 0 {
@@ -143,7 +221,6 @@ var getCmd = &cobra.Command{
 	},
 }
 
-
 var infoCmd = &cobra.Command{
 	Use:     "info <share-url>",
 	Short:   "Show secret metadata without burning it",
@@ -151,7 +228,7 @@ var infoCmd = &cobra.Command{
 	Args:    cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		secretID, _ := parseShareURL(args[0])
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		info, err := client.SecretInfo(secretID)
 		if err != nil {
 			return err
@@ -162,6 +239,10 @@ var infoCmd = &cobra.Command{
 		output.Field("Status", output.StatusIcon(info.Viewed))
 		output.Field("Password protected", output.BoolIcon(info.PasswordProtected))
 		output.Field("Views", fmt.Sprintf("%d / %d", info.ViewCount, info.MaxViews))
+		output.Field("Payload", info.PayloadType)
+		output.Field("Current version", strconv.Itoa(info.CurrentVersion))
+		output.Field("Location restricted", output.BoolIcon(info.LocationRestricted))
+		output.Field("Policy version", strconv.Itoa(info.PolicyVersion))
 		if info.CreatedAt != nil {
 			output.Field("Created at", output.FormatTime(*info.CreatedAt))
 		}
@@ -173,7 +254,6 @@ var infoCmd = &cobra.Command{
 		return nil
 	},
 }
-
 
 var listCmd = &cobra.Command{
 	Use:   "list",
@@ -202,7 +282,7 @@ var listCmd = &cobra.Command{
 			expired = &e
 		}
 
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		resp, err := client.ListSecrets(page, pageSize, viewed, expired)
 		if err != nil {
 			return err
@@ -220,7 +300,7 @@ var listCmd = &cobra.Command{
 		t := output.NewTable(os.Stdout, []string{"ID", "STATUS", "VIEWS", "EXPIRES IN", "PWD", "NOTIFY", "CREATED"})
 		for _, s := range resp.Items {
 			t.Append([]string{
-				s.ID[:8] + "…",
+				shortID(s.ID),
 				output.StatusIcon(s.Viewed),
 				fmt.Sprintf("%d/%d", s.ViewCount, s.MaxViews),
 				output.FormatDuration(s.ExpiresAt),
@@ -235,7 +315,6 @@ var listCmd = &cobra.Command{
 	},
 }
 
-
 var deleteCmd = &cobra.Command{
 	Use:     "delete <share-url>",
 	Short:   "Delete a secret before it expires",
@@ -246,7 +325,7 @@ var deleteCmd = &cobra.Command{
 			return err
 		}
 		secretID, _ := parseShareURL(args[0])
-		client := api.New(config.BaseURL(), config.AccessToken())
+		client := newAPIClient()
 		if err := client.DeleteSecret(secretID); err != nil {
 			return err
 		}
@@ -255,31 +334,35 @@ var deleteCmd = &cobra.Command{
 	},
 }
 
-
-// var rotateKeyCmd = &cobra.Command{
-// 	Use:   "rotate-key <share-url>",
-// 	Short: "Rotate the server-side encryption key for a secret",
-// 	Args:  cobra.ExactArgs(1),
-// 	RunE: func(cmd *cobra.Command, args []string) error {
-// 		if err := config.RequireAuth(); err != nil {
-// 			return err
-// 		}
-// 		secretID, _ := parseShareURL(args[0])
-// 		client := api.New(config.BaseURL(), config.AccessToken())
-// 		resp, err := client.RotateKey(secretID)
-// 		if err != nil {
-// 			return err
-// 		}
-// 		output.Header("Encryption key rotated")
-// 		output.Field("Secret ID", resp.SecretID)
-// 		output.Field("New key version", strconv.Itoa(resp.NewKeyVersion))
-// 		output.Field("Rotated at", output.FormatTime(resp.RotatedAt))
-// 		fmt.Println()
-// 		return nil
-// 	},
-// }
+var rotateKeyCmd = &cobra.Command{
+	Use:   "rotate-key <share-url-or-id>",
+	Short: "Re-encrypt a secret with a new data-encryption key",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := config.RequireAuth(); err != nil {
+			return err
+		}
+		secretID, _ := parseShareURL(args[0])
+		client := newAPIClient()
+		resp, err := client.RotateKey(secretID)
+		if err != nil {
+			return err
+		}
+		output.Header("Encryption key rotated")
+		output.Field("Secret ID", resp.SecretID)
+		output.Field("New key version", strconv.Itoa(resp.NewKeyVersion))
+		output.Field("Rotated at", output.FormatTime(resp.RotatedAt))
+		fmt.Println()
+		return nil
+	},
+}
 
 func init() {
+	shareCmd.Flags().StringArray("allow-email", nil, "Allowed recipient email (repeat for each recipient; requires login)")
+	shareCmd.Flags().StringArray("allow-cidr", nil, "Allowed IPv4/IPv6 network (repeatable)")
+	shareCmd.Flags().StringArray("allow-country", nil, "Allowed ISO country code (repeatable)")
+	shareCmd.Flags().String("location-mode", "all", "Combine CIDR and country rules: all or any")
+	shareCmd.Flags().Bool("geoip-fail-closed", true, "Deny access when country lookup is unavailable")
 	// share flags
 	shareCmd.Flags().StringP("file", "f", "", "Read secret content from this file")
 	shareCmd.Flags().StringP("expires", "e", "24h", "TTL: e.g. 30m, 1h, 12h, 7d (max 168h)")
@@ -288,10 +371,14 @@ func init() {
 	shareCmd.Flags().StringP("password", "p", "", "Require this password to retrieve the secret")
 	shareCmd.Flags().StringP("notify", "n", "", "Email address to notify when the secret is viewed")
 	shareCmd.Flags().StringP("webhook", "w", "", "Webhook URL to POST to on view")
+	shareCmd.Flags().String("note", "", "Version note (file secrets)")
+	shareCmd.Flags().Bool("client-encrypted", false, "Content is already client-encrypted base64 ciphertext")
+	shareCmd.Flags().String("client-nonce", "", "Base64 nonce for client-encrypted content")
 
 	// get flags
 	getCmd.Flags().StringP("password", "p", "", "Password if the secret is protected")
 	getCmd.Flags().Bool("raw", false, "Print only the secret content (no formatting)")
+	getCmd.Flags().StringP("output", "o", "", "Write a file secret to this path (defaults to its original filename)")
 
 	// list flags
 	listCmd.Flags().Int("page", 1, "Page number")
@@ -300,23 +387,91 @@ func init() {
 	listCmd.Flags().Bool("expired", false, "Filter: only expired secrets")
 }
 
-
 // parseShareURL extracts (secretID, token) from a full share URL or bare UUID.
 func parseShareURL(raw string) (secretID, token string) {
-	if idx := strings.Index(raw, "/api/secrets/"); idx != -1 {
-		rest := raw[idx+len("/api/secrets/"):]
-		if q := strings.Index(rest, "?"); q != -1 {
-			secretID = rest[:q]
-			// parse query string
-			qs, _ := url.ParseQuery(rest[q+1:])
-			token = qs.Get("token")
-		} else {
-			secretID = rest
+	secretID, token, _ = parseShareRef(raw)
+	return secretID, token
+}
+
+func parseShareRef(raw string) (secretID, token string, isFile bool) {
+	parsed, err := url.Parse(raw)
+	if err == nil {
+		token = parsed.Query().Get("token")
+		path := parsed.Path
+		if idx := strings.Index(path, "/api/secrets/"); idx != -1 {
+			rest := strings.Trim(path[idx+len("/api/secrets/"):], "/")
+			parts := strings.Split(rest, "/")
+			if len(parts) > 0 {
+				if parts[0] == "view" && len(parts) > 1 {
+					secretID = parts[1]
+					return
+				}
+				secretID = parts[0]
+				isFile = len(parts) > 1 && parts[1] == "file"
+				return
+			}
 		}
-		return
 	}
-	// bare UUID
-	return raw, ""
+	return strings.TrimSpace(raw), "", false
+}
+
+func retrieveFile(client *api.Client, secretID, password, token, destination string, raw bool) error {
+	resp, err := client.DownloadFile(secretID, password, token)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if raw || destination == "-" {
+		_, err = io.Copy(os.Stdout, resp.Body)
+		return err
+	}
+
+	filename := "download-" + secretID
+	if _, params, parseErr := mime.ParseMediaType(resp.Header.Get("Content-Disposition")); parseErr == nil {
+		if candidate := filepath.Base(params["filename"]); candidate != "." && candidate != "" {
+			filename = candidate
+		}
+	}
+	explicit := destination != ""
+	if !explicit {
+		destination = filename
+	} else if stat, statErr := os.Stat(destination); statErr == nil && stat.IsDir() {
+		destination = filepath.Join(destination, filename)
+	}
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if !explicit {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_EXCL
+	}
+	file, err := os.OpenFile(destination, flags, 0600)
+	if err != nil {
+		return fmt.Errorf("cannot create output file %q: %w", destination, err)
+	}
+	written, copyErr := io.Copy(file, resp.Body)
+	closeErr := file.Close()
+	if copyErr != nil {
+		return fmt.Errorf("download failed: %w", copyErr)
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	output.Success("Downloaded %s (%s).", destination, formatBytes(written))
+	return nil
+}
+
+func formatBytes(size int64) string {
+	const unit = int64(1024)
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	value := float64(size)
+	units := []string{"KiB", "MiB", "GiB", "TiB"}
+	for _, suffix := range units {
+		value /= 1024
+		if value < 1024 || suffix == units[len(units)-1] {
+			return fmt.Sprintf("%.1f %s", value, suffix)
+		}
+	}
+	return fmt.Sprintf("%d B", size)
 }
 
 // parseTTL converts "30m" → 1, "2h" → 2, "3d" → 72, bare int → hours.

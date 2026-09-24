@@ -12,6 +12,8 @@ import (
 	"github.com/superb-striker/phantom-share/phantom/internal/output"
 )
 
+var smtpSendMail = smtp.SendMail
+
 var pingCmd = &cobra.Command{
 	Use:   "ping <share-url>",
 	Short: "Email a share link to a recipient",
@@ -56,7 +58,11 @@ Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.
 			sender = from
 		}
 
-		viewURL := strings.Replace(shareURL, "/api/secrets/", "/api/secrets/view/", 1)
+		_, _, isFile := parseShareRef(shareURL)
+		viewURL := shareURL
+		if !isFile {
+			viewURL = strings.Replace(shareURL, "/api/secrets/", "/api/secrets/view/", 1)
+		}
 
 		body := buildPingEmail(from, to, subject, viewURL, message, sender, password)
 
@@ -66,7 +72,7 @@ Requires SMTP settings in ~/.phantom/config.yaml or via PHANTOM_SMTP_* env vars.
 			auth = smtp.PlainAuth("", smtpUser, smtpPass, smtpHost)
 		}
 
-		if err := smtp.SendMail(addr, auth, from, []string{to}, []byte(body)); err != nil {
+		if err := smtpSendMail(addr, auth, from, []string{to}, []byte(body)); err != nil {
 			return fmt.Errorf("failed to send email: %w", err)
 		}
 
@@ -98,19 +104,28 @@ func init() {
 
 func buildPingEmail(from, to, subject, shareURL, message, sender, password string) string {
 	var sb strings.Builder
-	sb.WriteString("From: "); sb.WriteString(from); sb.WriteString("\r\n")
-	sb.WriteString("To: "); sb.WriteString(to); sb.WriteString("\r\n")
-	sb.WriteString("Subject: "); sb.WriteString(subject); sb.WriteString("\r\n")
+	sb.WriteString("From: ")
+	sb.WriteString(from)
+	sb.WriteString("\r\n")
+	sb.WriteString("To: ")
+	sb.WriteString(to)
+	sb.WriteString("\r\n")
+	sb.WriteString("Subject: ")
+	sb.WriteString(subject)
+	sb.WriteString("\r\n")
 	sb.WriteString("MIME-Version: 1.0\r\n")
 	sb.WriteString("Content-Type: text/plain; charset=utf-8\r\n")
 	sb.WriteString("\r\n")
 
 	if message != "" {
-		sb.WriteString(message); sb.WriteString("\r\n\r\n")
+		sb.WriteString(message)
+		sb.WriteString("\r\n\r\n")
 	}
 
 	sb.WriteString("A secret has been shared with you via Phantom:\r\n\r\n")
-	sb.WriteString("  "); sb.WriteString(shareURL); sb.WriteString("\r\n\r\n")
+	sb.WriteString("  ")
+	sb.WriteString(shareURL)
+	sb.WriteString("\r\n\r\n")
 	sb.WriteString("⚠  This link is one-time use and will expire. Open it once to reveal the secret.\r\n")
 	sb.WriteString("   Once viewed, the secret is permanently destroyed.\r\n\r\n")
 
@@ -120,7 +135,9 @@ func buildPingEmail(from, to, subject, shareURL, message, sender, password strin
 	}
 
 	if sender != "" && sender != from {
-		sb.WriteString("Sent by: "); sb.WriteString(sender); sb.WriteString("\r\n\r\n")
+		sb.WriteString("Sent by: ")
+		sb.WriteString(sender)
+		sb.WriteString("\r\n\r\n")
 	}
 
 	sb.WriteString("─────────────────────────────────────────\r\n")
