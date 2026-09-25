@@ -123,6 +123,29 @@ services:
     networks:
       - phantom-share-net
 
+  jaeger:
+    image: cr.jaegertracing.io/jaegertracing/jaeger:2.21.0
+    ports:
+      - "16686:16686"
+    restart: unless-stopped
+    networks:
+      - phantom-share-net
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.161.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on:
+      jaeger:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - phantom-share-net
+
   phantom-share:
     build: .
     container_name: phantom-share-app
@@ -140,6 +163,13 @@ services:
       CLAMAV_HOST: "clamav"
       GEOIP_DATABASE_PATH: "/geoip/GeoLite2-Country.mmdb"
       TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-[]}
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-phantom-share}
+      OTEL_DEPLOYMENT_ENVIRONMENT: ${OTEL_DEPLOYMENT_ENVIRONMENT:-development}
+      OTEL_TRACES_EXPORTER: ${OTEL_TRACES_EXPORTER:-otlp}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_EXPORTER_OTLP_INSECURE: ${OTEL_EXPORTER_OTLP_INSECURE:-true}
+      OTEL_TRACE_SAMPLE_RATIO: ${OTEL_TRACE_SAMPLE_RATIO:-1.0}
     ports:
       - "8000:8000"
     volumes:
@@ -157,6 +187,8 @@ services:
         condition: service_completed_successfully
       clamav:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     restart: unless-stopped
     networks:
       - phantom-share-net
