@@ -42,6 +42,17 @@ class Settings(BaseSettings):
     TRUSTED_PROXY_CIDRS: list[str] = Field(default_factory=list)
     GEOIP_DATABASE_PATH: str = ""
 
+    # OpenTelemetry. Standard OTLP headers, certificates, compression, and
+    # batch-processor settings continue to come from OTEL_* environment vars.
+    OTEL_ENABLED: bool = True
+    OTEL_SERVICE_NAME: str = "phantom-share"
+    OTEL_DEPLOYMENT_ENVIRONMENT: str = "development"
+    OTEL_TRACES_EXPORTER: str = "otlp"
+    OTEL_EXPORTER_OTLP_ENDPOINT: str = "http://localhost:4317"
+    OTEL_EXPORTER_OTLP_INSECURE: bool = True
+    OTEL_TRACE_SAMPLE_RATIO: float = Field(default=1.0, ge=0.0, le=1.0)
+    OTEL_EXCLUDED_URLS: str = "/health"
+
     # Encryption 
     CHACHA_KEY_BYTES : int 
 
