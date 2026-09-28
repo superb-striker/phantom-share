@@ -7,10 +7,11 @@ consumes these messages asynchronously with retry + DLQ semantics.
 """
 import json
 import logging
-from typing import Optional
 
 import aio_pika
+from opentelemetry.trace import SpanKind
 
+from app.core.amqp_tracing import inject_trace_headers, message_span
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -26,7 +27,7 @@ WEBHOOK_ROUTING_KEY   = "notify.webhook"
 # Injected by notification_worker once its topology is ready.
 # This is just a lightweight reference to the worker's exchange object —
 # it does not own a connection.
-_exchange: Optional[aio_pika.abc.AbstractExchange] = None
+_exchange: aio_pika.abc.AbstractExchange | None = None
 
 
 def set_exchange(exchange: aio_pika.abc.AbstractExchange) -> None:
@@ -58,7 +59,6 @@ async def publish(routing_key: str, payload: dict) -> None:
     or has already shut down — a notification failure must never propagate
     to the caller (secret retrieval hot path).
     """
-    print(f"[PUBLISH] routing_key={routing_key} payload={payload}")
     if _exchange is None:
         logger.error(
             "Notification exchange not available — worker may not have started yet. "
@@ -66,14 +66,21 @@ async def publish(routing_key: str, payload: dict) -> None:
         )
         return
     try:
-        await _exchange.publish(
-            aio_pika.Message(
-                body=json.dumps(payload).encode(),
-                delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                content_type="application/json",
-            ),
-            routing_key=routing_key,
-        )
+        with message_span(
+            "amqp.publish",
+            kind=SpanKind.PRODUCER,
+            destination=NOTIFICATION_EXCHANGE,
+            operation="publish",
+        ):
+            await _exchange.publish(
+                aio_pika.Message(
+                    body=json.dumps(payload).encode(),
+                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                    content_type="application/json",
+                    headers=inject_trace_headers(),
+                ),
+                routing_key=routing_key,
+            )
     except Exception as exc:
         # Log and swallow — notification failure must never break secret retrieval
         logger.error(
@@ -84,15 +91,14 @@ async def publish(routing_key: str, payload: dict) -> None:
 
 async def notify_secret_viewed(
     secret_id: str,
-    notify_email: Optional[str],
-    webhook_url: Optional[str],
-    actor_ip: Optional[str] = None,
+    notify_email: str | None,
+    webhook_url: str | None,
+    actor_ip: str | None = None,
 ) -> None:
     """
     Enqueue email and/or webhook notifications for a secret view event.
     Returns immediately — delivery is handled by notification_worker.
     """
-    print(f"[NOTIFY] called: email={notify_email}, webhook={webhook_url}, secret={secret_id}")
     ip = actor_ip or "unknown"
     if notify_email:
         if not settings.SMTP_USERNAME or not settings.SMTP_PASSWORD:

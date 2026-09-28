@@ -5,12 +5,15 @@ import asyncio
 import json
 import logging
 import smtplib
-import aio_pika
-import httpx
-from typing import Optional
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import aio_pika
+import httpx
+from opentelemetry import trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
+
+from app.core.amqp_tracing import inject_trace_headers, message_span
 from app.core.config import get_settings
 from app.services.notification_service import (
     EMAIL_QUEUE,
@@ -18,8 +21,8 @@ from app.services.notification_service import (
     NOTIFICATION_EXCHANGE,
     WEBHOOK_QUEUE,
     WEBHOOK_ROUTING_KEY,
-    set_exchange,
     clear_exchange,
+    set_exchange,
 )
 
 settings = get_settings()
@@ -32,7 +35,7 @@ MAX_RETRIES         = 3
 RETRY_BASE_DELAY    = 1   
 RETRY_LOOP_INTERVAL = 30  
 
-_stop_event: Optional[asyncio.Event] = None
+_stop_event: asyncio.Event | None = None
 
 
 async def setup_topology(
@@ -86,7 +89,11 @@ def build_email(to: str, secret_id: str, actor_ip: str) -> MIMEMultipart:
 
 
 def send_smtp(to: str, secret_id: str, actor_ip: str) -> None:
-    print(f"[SMTP] sending to={to} host={settings.SMTP_HOST}:{settings.SMTP_PORT}")
+    logger.debug(
+        "Sending SMTP notification via %s:%s",
+        settings.SMTP_HOST,
+        settings.SMTP_PORT,
+    )
     msg = build_email(to, secret_id, actor_ip)
     with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
         server.ehlo()
@@ -96,35 +103,51 @@ def send_smtp(to: str, secret_id: str, actor_ip: str) -> None:
 
 
 async def handle_email(message: aio_pika.abc.AbstractIncomingMessage) -> None:
-    print(f"[HANDLE_EMAIL] received message")
-    async with message.process(requeue=False):
-        payload = json.loads(message.body)
-        await asyncio.to_thread(
-            send_smtp,
-            payload["to"],
-            payload["secret_id"],
-            payload["actor_ip"],
-        )
-        logger.info(
-            "Email notification sent: to=%s secret_id=%s",
-            payload["to"], payload["secret_id"],
-        )
+    with message_span(
+        "amqp.consume.email",
+        kind=SpanKind.CONSUMER,
+        destination=EMAIL_QUEUE,
+        headers=message.headers,
+        operation="process",
+    ):
+        async with message.process(requeue=False):
+            payload = json.loads(message.body)
+            with trace.get_tracer("phantom.notifications").start_as_current_span(
+                "smtp.send", kind=SpanKind.CLIENT
+            ):
+                await asyncio.to_thread(
+                    send_smtp,
+                    payload["to"],
+                    payload["secret_id"],
+                    payload["actor_ip"],
+                )
+            logger.info(
+                "Email notification sent: secret_id=%s",
+                payload["secret_id"],
+            )
 
 
 async def handle_webhook(message: aio_pika.abc.AbstractIncomingMessage) -> None:
-    async with message.process(requeue=False):
-        payload = json.loads(message.body)
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(payload["url"], json={
-                "secret_id": payload["secret_id"],
-                "event":     payload["event"],
-                "actor_ip":  payload["actor_ip"],
-            })
-            resp.raise_for_status()
-        logger.info(
-            "Webhook fired: url=%s secret_id=%s status=%s",
-            payload["url"], payload["secret_id"], resp.status_code,
-        )
+    with message_span(
+        "amqp.consume.webhook",
+        kind=SpanKind.CONSUMER,
+        destination=WEBHOOK_QUEUE,
+        headers=message.headers,
+        operation="process",
+    ):
+        async with message.process(requeue=False):
+            payload = json.loads(message.body)
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(payload["url"], json={
+                    "secret_id": payload["secret_id"],
+                    "event":     payload["event"],
+                    "actor_ip":  payload["actor_ip"],
+                })
+                resp.raise_for_status()
+            logger.info(
+                "Webhook fired: secret_id=%s status=%s",
+                payload["secret_id"], resp.status_code,
+            )
 
 
 async def retry_loop(
@@ -146,24 +169,44 @@ async def retry_loop(
                     break
                 headers = message.headers or {}
                 attempt = int(str(headers.get("x-retry-attempt", 0))) + 1
-                delay   = RETRY_BASE_DELAY * (2 ** (attempt - 1))  
+                delay   = RETRY_BASE_DELAY * (2 ** (attempt - 1))
                 if attempt > MAX_RETRIES:
-                    await message.ack()
-                    fire_critical_alert(message.body, routing_key, attempt)
+                    with message_span(
+                        "amqp.retry.exhausted",
+                        kind=SpanKind.CONSUMER,
+                        destination=dlq.name,
+                        headers=headers,
+                        operation="process",
+                    ) as span:
+                        span.set_attribute("messaging.retry.attempt", attempt)
+                        span.set_status(Status(StatusCode.ERROR, "retry limit exceeded"))
+                        await message.ack()
+                        fire_critical_alert(message.body, routing_key, attempt)
                     continue
                 logger.warning(
                     "Retrying failed notification: attempt=%d/%d queue=%s",
                     attempt, MAX_RETRIES, routing_key,
                 )
                 await asyncio.sleep(delay)
-                retry_msg = aio_pika.Message(
-                    body=message.body,
-                    delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
-                    content_type="application/json",
-                    headers={**headers, "x-retry-attempt": attempt},
-                )
-                await exchange.publish(retry_msg, routing_key=routing_key)
-                await message.ack()
+                with message_span(
+                    "amqp.retry.publish",
+                    kind=SpanKind.PRODUCER,
+                    destination=NOTIFICATION_EXCHANGE,
+                    headers=headers,
+                    operation="publish",
+                ) as span:
+                    span.set_attribute("messaging.retry.attempt", attempt)
+                    retry_headers = inject_trace_headers(
+                        {**headers, "x-retry-attempt": attempt}
+                    )
+                    retry_msg = aio_pika.Message(
+                        body=message.body,
+                        delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                        content_type="application/json",
+                        headers=retry_headers,
+                    )
+                    await exchange.publish(retry_msg, routing_key=routing_key)
+                    await message.ack()
 
 
 def fire_critical_alert(body: bytes, routing_key: str, attempts: int) -> None:
@@ -178,7 +221,7 @@ def fire_critical_alert(body: bytes, routing_key: str, attempts: int) -> None:
     )
 
 
-async def notification_worker(ready_event: Optional[asyncio.Event] = None) -> None:
+async def notification_worker(ready_event: asyncio.Event | None = None) -> None:
     """Worker entrypoint. FIXED: Uses get_queue and triggers startup synchronization event."""
     global _stop_event
     _stop_event = asyncio.Event()   
