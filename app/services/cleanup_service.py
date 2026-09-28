@@ -21,6 +21,9 @@ import asyncio
 import uuid
 from datetime import datetime, timezone
 
+from opentelemetry import trace
+from opentelemetry.context import Context
+
 from app.core.database import get_pool
 from app.core.redis_client import get_redis
 from app.services import audit_service, quota_service, storage_service
@@ -32,6 +35,7 @@ REDIS_SWEEP_LOCK    = "phantom:lock:sweep"      # global fallback-sweep lock
 FALLBACK_SWEEP_INTERVAL = 600   # seconds
 SECRET_LOCK_TTL         = 30    # seconds - safely covers one DB delete round-trip
 SWEEP_LOCK_TTL          = 120   # seconds - covers the full sweep even under load
+tracer = trace.get_tracer("phantom.cleanup")
 
 
 async def schedule_expiry(secret_id: str, ttl_seconds: int) -> None:
@@ -74,6 +78,18 @@ async def release_lock(lock_key: str, token: str) -> None:
 
 
 async def delete_secret(secret_id: str) -> None:
+    """Run an expiry deletion in a new worker trace."""
+    with tracer.start_as_current_span(
+        "cleanup.delete_secret",
+        context=Context(),
+        attributes={"cleanup.source": "redis_expiry"},
+        record_exception=True,
+        set_status_on_exception=True,
+    ):
+        await _delete_secret(secret_id)
+
+
+async def _delete_secret(secret_id: str) -> None:
     """
     Delete a single secret from PostgreSQL (redis-event driven).
 
@@ -89,12 +105,11 @@ async def delete_secret(secret_id: str) -> None:
         return
     try:
         pool = get_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "DELETE FROM secrets WHERE id = %s RETURNING id, owner_id", (secret_id,)
-                )
-                deleted = await cur.fetchone()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "DELETE FROM secrets WHERE id = %s RETURNING id, owner_id", (secret_id,)
+            )
+            deleted = await cur.fetchone()
         # Only audit if the row actually existed - avoids ghost entries for
         # secrets already removed by the PostgreSQL trigger or a prior sweep.
         if deleted:
@@ -110,6 +125,21 @@ async def delete_secret(secret_id: str) -> None:
 
 
 async def fallback_sweep() -> dict:
+    """Run a periodic sweep in a new worker trace and record its result."""
+    with tracer.start_as_current_span(
+        "cleanup.fallback_sweep",
+        context=Context(),
+        record_exception=True,
+        set_status_on_exception=True,
+    ) as span:
+        result = await _fallback_sweep()
+        span.set_attribute("cleanup.secrets_deleted", result["secrets_deleted"])
+        span.set_attribute("cleanup.sessions_deleted", result["sessions_deleted"])
+        span.set_attribute("cleanup.users_deleted", result["users_deleted"])
+        return result
+
+
+async def _fallback_sweep() -> dict:
     """
     Hard-delete expired / fully-viewed secrets, inactive users, and stale
     sessions. Returns total count of deleted rows.
@@ -130,43 +160,42 @@ async def fallback_sweep() -> dict:
         }
     try:
         pool = get_pool()
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                # Expired or fully-viewed secrets
-                await cur.execute(
-                    """
+        async with pool.connection() as conn, conn.cursor() as cur:
+            # Expired or fully-viewed secrets
+            await cur.execute(
+                """
                     DELETE FROM secrets
                     WHERE expires_at < NOW() OR view_count >= max_views
                     RETURNING id, owner_id
                     """
-                )
-                deleted_secret_rows = await cur.fetchall()
-                deleted_secrets = [row[0] for row in deleted_secret_rows]
-                # Inactive users past their delete_after date
-                await cur.execute(
-                    """
+            )
+            deleted_secret_rows = await cur.fetchall()
+            deleted_secrets = [row[0] for row in deleted_secret_rows]
+            # Inactive users past their delete_after date
+            await cur.execute(
+                """
                     DELETE FROM users
                     WHERE is_active = FALSE AND delete_after <= NOW()
                     RETURNING id
                     """
-                )
-                deleted_users = [row[0] for row in await cur.fetchall()]
-                # Tracking and verification challenges have independent lifetimes.
-                await cur.execute(
-                    "DELETE FROM secret_tracking WHERE retain_until <= clock_timestamp()"
-                )
-                await cur.execute(
-                    "DELETE FROM email_verifications WHERE expires_at <= clock_timestamp()"
-                )
-                # Revoked or expired sessions
-                await cur.execute(
-                    """
+            )
+            deleted_users = [row[0] for row in await cur.fetchall()]
+            # Tracking and verification challenges have independent lifetimes.
+            await cur.execute(
+                "DELETE FROM secret_tracking WHERE retain_until <= clock_timestamp()"
+            )
+            await cur.execute(
+                "DELETE FROM email_verifications WHERE expires_at <= clock_timestamp()"
+            )
+            # Revoked or expired sessions
+            await cur.execute(
+                """
                     DELETE FROM sessions
                     WHERE revoked = TRUE OR expires_at <= NOW()
                     RETURNING id
                     """
-                )
-                deleted_sessions = await cur.fetchall()
+            )
+            deleted_sessions = await cur.fetchall()
         # Log per secret so secret_id is captured individually
         for secret_id in deleted_secrets:
             await audit_service.log(
@@ -235,57 +264,53 @@ async def process_storage_cleanup() -> dict:
     affected_users: set[str] = set()
     objects_deleted = 0
     pending_deleted = 0
-    async with get_pool().connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
+    async with get_pool().connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
                 SELECT id, object_key, user_id FROM object_deletion_outbox
                 WHERE processed_at IS NULL AND next_attempt_at <= clock_timestamp()
                 ORDER BY id LIMIT 100
                 """
-            )
-            outbox = await cur.fetchall()
-            await cur.execute(
-                """
+        )
+        outbox = await cur.fetchall()
+        await cur.execute(
+            """
                 SELECT id, object_key, user_id, reservation_id
                 FROM pending_uploads WHERE expires_at <= clock_timestamp()
                 ORDER BY expires_at LIMIT 100
                 """
-            )
-            pending = await cur.fetchall()
+        )
+        pending = await cur.fetchall()
 
     for row_id, object_key, user_id in outbox:
         try:
             await storage_service.delete(object_key)
-            async with get_pool().connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "UPDATE object_deletion_outbox SET processed_at = clock_timestamp(), last_error = NULL WHERE id = %s",
-                        (row_id,),
-                    )
+            async with get_pool().connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE object_deletion_outbox SET processed_at = clock_timestamp(), last_error = NULL WHERE id = %s",
+                    (row_id,),
+                )
             objects_deleted += 1
             if user_id:
                 affected_users.add(str(user_id))
         except Exception as exc:
-            async with get_pool().connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        UPDATE object_deletion_outbox SET attempts = attempts + 1,
-                            last_error = %s,
-                            next_attempt_at = clock_timestamp() +
-                                LEAST(3600, POWER(2, LEAST(attempts, 11))) * INTERVAL '1 second'
-                        WHERE id = %s
-                        """,
-                        (str(exc)[:1000], row_id),
-                    )
+            async with get_pool().connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    UPDATE object_deletion_outbox SET attempts = attempts + 1,
+                        last_error = %s,
+                        next_attempt_at = clock_timestamp() +
+                            LEAST(3600, POWER(2, LEAST(attempts, 11))) * INTERVAL '1 second'
+                    WHERE id = %s
+                    """,
+                    (str(exc)[:1000], row_id),
+                )
 
     for pending_id, object_key, user_id, reservation_id in pending:
         try:
             await storage_service.delete(object_key)
-            async with get_pool().connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("DELETE FROM pending_uploads WHERE id = %s", (pending_id,))
+            async with get_pool().connection() as conn, conn.cursor() as cur:
+                await cur.execute("DELETE FROM pending_uploads WHERE id = %s", (pending_id,))
             await quota_service.release(quota_service.Reservation(
                 str(reservation_id), str(user_id), 0, 0
             ))

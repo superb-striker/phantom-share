@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import get_settings
 from app.core.database import close_pool, get_pool, init_pool
 from app.core.redis_client import close_redis, init_redis
+from app.core.tracing import configure_tracing, shutdown_tracing
 from app.middleware.audit import AuditMiddleware
 from app.routers import admin, auth, files, quotas, secrets, stats
 from app.services.cleanup_service import expiry_worker
@@ -89,6 +90,7 @@ async def lifespan(app: FastAPI):
         
     await close_pool()
     await close_redis()
+    await asyncio.to_thread(shutdown_tracing)
     logger.info("Shutdown complete")
     
 
@@ -103,6 +105,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+configure_tracing(app)
+
 app.add_middleware(AuditMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -110,6 +114,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Trace-ID"],
 )
 
 app.include_router(auth.router)
