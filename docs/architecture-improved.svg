@@ -1,0 +1,365 @@
+<svg width="100%" viewBox="0 0 760 1470" role="img" xmlns="http://www.w3.org/2000/svg" aria-labelledby="title desc">
+  <title id="title">Phantom Share Architecture</title>
+  <desc id="desc">Secure secret-sharing architecture showing authenticated request handling, access policy enforcement, versioned envelope encryption, virus-scanned file storage, PostgreSQL, Redis, RabbitMQ workers, dbmate migrations, and OpenTelemetry tracing.</desc>
+
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text: #111111;
+      --muted: #666666;
+      --arrow: #888780;
+      --label: #888780;
+      --divider: rgba(0, 0, 0, 0.12);
+      --section-bg: #e8e8e6;
+      --section-fg: #444441;
+      --section-border: #b4b2a9;
+
+      --gray-fill: #444441;
+      --gray-stroke: #b4b2a9;
+      --gray-title: #d3d1c7;
+      --gray-sub: #b4b2a9;
+
+      --blue-fill: #0c447c;
+      --blue-stroke: #85b7eb;
+      --blue-title: #b5d4f4;
+      --blue-sub: #85b7eb;
+
+      --purple-fill: #3c3489;
+      --purple-stroke: #afa9ec;
+      --purple-title: #cecbf6;
+      --purple-sub: #afa9ec;
+
+      --amber-fill: #633806;
+      --amber-stroke: #ef9f27;
+      --amber-title: #fac775;
+      --amber-sub: #ef9f27;
+
+      --teal-fill: #085041;
+      --teal-stroke: #5dcaa5;
+      --teal-title: #9fe1cb;
+      --teal-sub: #5dcaa5;
+
+      --coral-fill: #712b13;
+      --coral-stroke: #f0997b;
+      --coral-title: #f5c4b3;
+      --coral-sub: #f0997b;
+
+      --green-fill: #27500a;
+      --green-stroke: #97c459;
+      --green-title: #c0dd97;
+      --green-sub: #97c459;
+
+      --red-fill: #791f1f;
+      --red-stroke: #f09595;
+      --red-title: #f7c1c1;
+      --red-sub: #f09595;
+
+      --danger: #e24b4a;
+      --success: #639922;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b0b0c;
+        --text: #e8e8e8;
+        --muted: #b0b0b0;
+        --arrow: #5f5e5a;
+        --label: #888780;
+        --divider: rgba(255, 255, 255, 0.10);
+        --section-bg: #1e1e1c;
+        --section-fg: #b4b2a9;
+        --section-border: #3a3a38;
+
+        --gray-fill: #2c2c2a;
+        --gray-stroke: #5f5e5a;
+        --blue-fill: #042c53;
+        --blue-stroke: #185fa5;
+        --purple-fill: #26215c;
+        --purple-stroke: #534ab7;
+        --amber-fill: #412402;
+        --amber-stroke: #854f0b;
+        --teal-fill: #04342c;
+        --teal-stroke: #0f6e56;
+        --coral-fill: #4a1b0c;
+        --coral-stroke: #993c1d;
+        --green-fill: #173404;
+        --green-stroke: #3b6d11;
+        --red-fill: #501313;
+        --red-stroke: #a32d2d;
+      }
+    }
+
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .section { font-size: 12px; font-weight: 500; letter-spacing: 0.08em; fill: var(--section-fg, #444441); opacity: 0.72; }
+    .title { font-size: 14px; font-weight: 500; }
+    .sub { font-size: 12px; font-weight: 400; }
+    .tiny { font-size: 11px; font-weight: 400; }
+    .label { font-size: 12px; fill: var(--label, #888780); }
+    .flow { fill: none; stroke: var(--arrow, #888780); stroke-width: 1.5; marker-end: url(#arr); }
+    .flow-danger { fill: none; stroke: var(--danger, #e24b4a); stroke-width: 1; stroke-dasharray: 4 3; marker-end: url(#arr-danger); }
+    .flow-success { fill: none; stroke: var(--success, #639922); stroke-width: 1.2; marker-end: url(#arr-success); }
+    .flow-control { fill: none; stroke: var(--arrow, #888780); stroke-width: 1; stroke-dasharray: 3 4; marker-end: url(#arr); }
+  </style>
+
+  <defs>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="var(--arrow, #888780)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arr-danger" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="var(--danger, #e24b4a)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arr-success" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="var(--success, #639922)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="100%" height="100%" fill="var(--bg, #ffffff)"/>
+
+  <!-- Section dividers -->
+  <g>
+    <rect x="40" y="28" width="104" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="92" y="38" class="section" text-anchor="middle" dominant-baseline="central">REQUEST ENTRY</text>
+    <line x1="40" y1="46" x2="720" y2="46" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+  <g>
+    <rect x="40" y="215" width="102" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="91" y="225" class="section" text-anchor="middle" dominant-baseline="central">API &amp; POLICY</text>
+    <line x1="40" y1="233" x2="720" y2="233" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+  <g>
+    <rect x="40" y="500" width="128" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="104" y="510" class="section" text-anchor="middle" dominant-baseline="central">SECRET DATA PATHS</text>
+    <line x1="40" y1="518" x2="720" y2="518" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+  <g>
+    <rect x="40" y="825" width="132" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="106" y="835" class="section" text-anchor="middle" dominant-baseline="central">STATEFUL SERVICES</text>
+    <line x1="40" y1="843" x2="720" y2="843" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+  <g>
+    <rect x="40" y="1000" width="130" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="105" y="1010" class="section" text-anchor="middle" dominant-baseline="central">ASYNC LIFECYCLE</text>
+    <line x1="40" y1="1018" x2="720" y2="1018" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+  <g>
+    <rect x="40" y="1300" width="88" height="18" rx="4" fill="var(--section-bg, #e8e8e6)" stroke="var(--section-border, #b4b2a9)" stroke-width="0.5"/>
+    <text x="84" y="1310" class="section" text-anchor="middle" dominant-baseline="central">OPERATIONS</text>
+    <line x1="40" y1="1318" x2="720" y2="1318" stroke="var(--divider, rgba(0,0,0,0.12))" stroke-width="0.5"/>
+  </g>
+
+  <!-- Request entry -->
+  <g>
+    <rect x="50" y="68" width="170" height="58" rx="8" fill="var(--gray-fill, #444441)" stroke="var(--gray-stroke, #b4b2a9)" stroke-width="0.5"/>
+    <text x="135" y="91" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--gray-title, #d3d1c7)">Client</text>
+    <text x="135" y="110" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--gray-sub, #b4b2a9)">Go CLI · browser · API</text>
+  </g>
+
+  <line x1="220" y1="97" x2="278" y2="97" class="flow"/>
+  <text x="249" y="89" class="label" text-anchor="middle">HTTPS</text>
+
+  <g>
+    <rect x="280" y="68" width="220" height="58" rx="8" fill="var(--blue-fill, #0c447c)" stroke="var(--blue-stroke, #85b7eb)" stroke-width="0.5"/>
+    <text x="390" y="91" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--blue-title, #b5d4f4)">FastAPI</text>
+    <text x="390" y="110" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--blue-sub, #85b7eb)">JSON · multipart · signed links</text>
+  </g>
+
+  <line x1="500" y1="97" x2="563" y2="97" class="flow-danger"/>
+  <text x="532" y="88" class="label" text-anchor="middle" fill="var(--danger, #e24b4a)">4xx</text>
+  <g>
+    <rect x="565" y="75" width="145" height="44" rx="8" fill="var(--red-fill, #791f1f)" stroke="var(--red-stroke, #f09595)" stroke-width="0.5"/>
+    <text x="637.5" y="91" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--red-title, #f7c1c1)">Rejected request</text>
+    <text x="637.5" y="107" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--red-sub, #f09595)">invalid · denied · limited</text>
+  </g>
+
+  <line x1="390" y1="126" x2="390" y2="148" class="flow"/>
+  <g>
+    <rect x="280" y="150" width="220" height="44" rx="8" fill="var(--purple-fill, #3c3489)" stroke="var(--purple-stroke, #afa9ec)" stroke-width="0.5"/>
+    <text x="390" y="167" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--purple-title, #cecbf6)">AuditMiddleware</text>
+    <text x="390" y="184" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">trusted client IP · security headers</text>
+  </g>
+  <line x1="390" y1="194" x2="390" y2="258" class="flow"/>
+
+  <!-- API and policy pipeline -->
+  <g>
+    <rect x="80" y="260" width="600" height="205" rx="8" fill="var(--teal-fill, #085041)" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+    <text x="380" y="281" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">Request authorization &amp; feature dispatch</text>
+
+    <g>
+      <rect x="100" y="304" width="170" height="125" rx="8" fill="none" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+      <text x="185" y="325" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">1. Authenticate</text>
+      <text x="185" y="350" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">JWT + DB session</text>
+      <text x="185" y="370" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">RBAC hierarchy</text>
+      <text x="185" y="390" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">Redis rate limit</text>
+      <text x="185" y="410" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">quota reservation</text>
+    </g>
+
+    <line x1="270" y1="366" x2="293" y2="366" class="flow-success"/>
+
+    <g>
+      <rect x="295" y="304" width="170" height="125" rx="8" fill="none" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+      <text x="380" y="325" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">2. Authorize</text>
+      <text x="380" y="350" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">verified email allowlist</text>
+      <text x="380" y="370" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">CIDR + country policy</text>
+      <text x="380" y="390" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">password + signed token</text>
+      <text x="380" y="410" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">owner / admin checks</text>
+    </g>
+
+    <line x1="465" y1="366" x2="488" y2="366" class="flow-success"/>
+
+    <g>
+      <rect x="490" y="304" width="170" height="125" rx="8" fill="none" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+      <text x="575" y="325" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">3. Dispatch</text>
+      <text x="575" y="350" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">text secrets</text>
+      <text x="575" y="370" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">file secrets</text>
+      <text x="575" y="390" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">versions + views</text>
+      <text x="575" y="410" class="sub" text-anchor="middle" fill="var(--teal-sub, #5dcaa5)">admin + statistics</text>
+    </g>
+  </g>
+
+  <!-- Policy dependencies -->
+  <path d="M80 366 H30 V915 H293" class="flow-control"/>
+  <text x="36" y="625" class="label" transform="rotate(-90 36 625)" text-anchor="middle">rate limits · quotas · TTL · locks</text>
+  <path d="M680 420 H735 V1080 H242" class="flow-control"/>
+  <text x="728" y="745" class="label" transform="rotate(-90 728 745)" text-anchor="middle">audit + notification events</text>
+
+  <!-- Split into text and file paths -->
+  <path d="M380 465 V540 H205 V548" class="flow"/>
+  <path d="M380 540 H555 V548" class="flow"/>
+
+  <g>
+    <rect x="70" y="550" width="270" height="60" rx="8" fill="var(--purple-fill, #3c3489)" stroke="var(--purple-stroke, #afa9ec)" stroke-width="0.5"/>
+    <text x="205" y="573" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--purple-title, #cecbf6)">Text version service</text>
+    <text x="205" y="594" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">append-only updates · restore · optional E2E</text>
+  </g>
+
+  <g>
+    <rect x="420" y="550" width="270" height="60" rx="8" fill="var(--purple-fill, #3c3489)" stroke="var(--purple-stroke, #afa9ec)" stroke-width="0.5"/>
+    <text x="555" y="573" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--purple-title, #cecbf6)">File version service</text>
+    <text x="555" y="594" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">multipart stream · size quota · append-only</text>
+  </g>
+
+  <line x1="205" y1="610" x2="205" y2="653" class="flow"/>
+  <g>
+    <rect x="90" y="655" width="230" height="70" rx="8" fill="var(--teal-fill, #085041)" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+    <text x="205" y="679" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">Envelope encryption</text>
+    <text x="205" y="699" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">ChaCha20-Poly1305 · fresh DEK/version</text>
+    <text x="205" y="715" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">ciphertext persisted · plaintext never persisted</text>
+  </g>
+
+  <line x1="555" y1="610" x2="455" y2="653" class="flow"/>
+  <g>
+    <rect x="390" y="655" width="130" height="70" rx="8" fill="var(--coral-fill, #712b13)" stroke="var(--coral-stroke, #f0997b)" stroke-width="0.5"/>
+    <text x="455" y="679" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--coral-title, #f5c4b3)">ClamAV</text>
+    <text x="455" y="699" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--coral-sub, #f0997b)">INSTREAM scan</text>
+    <text x="455" y="715" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--coral-sub, #f0997b)">fail closed</text>
+  </g>
+
+  <line x1="520" y1="690" x2="553" y2="690" class="flow-success"/>
+  <g>
+    <rect x="555" y="655" width="150" height="70" rx="8" fill="var(--teal-fill, #085041)" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+    <text x="630" y="679" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">File crypto</text>
+    <text x="630" y="699" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">chunked AEAD</text>
+    <text x="630" y="715" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">encrypted filename</text>
+  </g>
+
+  <!-- KEK supplies both encryption paths -->
+  <g>
+    <rect x="245" y="760" width="270" height="44" rx="8" fill="var(--gray-fill, #444441)" stroke="var(--gray-stroke, #b4b2a9)" stroke-width="0.5"/>
+    <text x="380" y="777" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--gray-title, #d3d1c7)">Master KEK — environment only</text>
+    <text x="380" y="794" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--gray-sub, #b4b2a9)">wraps DEKs · never stored in PostgreSQL</text>
+  </g>
+  <path d="M315 760 V742 H205 V727" class="flow-control"/>
+  <path d="M445 760 V742 H630 V727" class="flow-control"/>
+
+  <!-- Stateful services -->
+  <path d="M205 725 V873" class="flow"/>
+  <path d="M630 725 V873" class="flow"/>
+
+  <g>
+    <rect x="60" y="875" width="210" height="80" rx="8" fill="var(--blue-fill, #0c447c)" stroke="var(--blue-stroke, #85b7eb)" stroke-width="0.5"/>
+    <text x="165" y="899" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--blue-title, #b5d4f4)">PostgreSQL 16</text>
+    <text x="165" y="921" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--blue-sub, #85b7eb)">ciphertext · wrapped DEKs · versions</text>
+    <text x="165" y="940" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--blue-sub, #85b7eb)">sessions · views · policies · audit</text>
+  </g>
+
+  <g>
+    <rect x="295" y="875" width="170" height="80" rx="8" fill="var(--amber-fill, #633806)" stroke="var(--amber-stroke, #ef9f27)" stroke-width="0.5"/>
+    <text x="380" y="899" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--amber-title, #fac775)">Redis 8</text>
+    <text x="380" y="921" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">rate limits · quotas</text>
+    <text x="380" y="940" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">expiry sentinels · locks</text>
+  </g>
+
+  <g>
+    <rect x="490" y="875" width="220" height="80" rx="8" fill="var(--amber-fill, #633806)" stroke="var(--amber-stroke, #ef9f27)" stroke-width="0.5"/>
+    <text x="600" y="899" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--amber-title, #fac775)">S3 / MinIO</text>
+    <text x="600" y="921" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">private encrypted file objects</text>
+    <text x="600" y="940" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">opaque keys · deletion outbox target</text>
+  </g>
+
+  <!-- Async notification path -->
+  <g>
+    <rect x="50" y="1045" width="190" height="70" rx="8" fill="var(--amber-fill, #633806)" stroke="var(--amber-stroke, #ef9f27)" stroke-width="0.5"/>
+    <text x="145" y="1069" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--amber-title, #fac775)">RabbitMQ</text>
+    <text x="145" y="1090" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">notification queue · DLQ</text>
+    <text x="145" y="1105" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--amber-sub, #ef9f27)">W3C trace headers</text>
+  </g>
+
+  <line x1="240" y1="1080" x2="283" y2="1080" class="flow"/>
+  <text x="262" y="1072" class="label" text-anchor="middle">consume</text>
+  <g>
+    <rect x="285" y="1045" width="200" height="70" rx="8" fill="var(--purple-fill, #3c3489)" stroke="var(--purple-stroke, #afa9ec)" stroke-width="0.5"/>
+    <text x="385" y="1069" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--purple-title, #cecbf6)">Notification worker</text>
+    <text x="385" y="1090" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">retry + dead-letter handling</text>
+    <text x="385" y="1105" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">continues request trace</text>
+  </g>
+
+  <line x1="485" y1="1080" x2="528" y2="1080" class="flow"/>
+  <text x="506" y="1072" class="label" text-anchor="middle">deliver</text>
+  <g>
+    <rect x="530" y="1045" width="180" height="70" rx="8" fill="var(--green-fill, #27500a)" stroke="var(--green-stroke, #97c459)" stroke-width="0.5"/>
+    <text x="620" y="1069" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--green-title, #c0dd97)">Email / webhook</text>
+    <text x="620" y="1090" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--green-sub, #97c459)">view notifications</text>
+    <text x="620" y="1105" class="tiny" text-anchor="middle" dominant-baseline="central" fill="var(--green-sub, #97c459)">outside request latency</text>
+  </g>
+
+  <!-- Cleanup path -->
+  <path d="M380 955 V1210 H253" class="flow-control"/>
+  <text x="368" y="1160" class="label" text-anchor="end">expiry event + lock</text>
+  <path d="M165 955 V1145 H380 V1168" class="flow-control"/>
+  <text x="230" y="1137" class="label" text-anchor="middle">10-minute DB sweep</text>
+  <g>
+    <rect x="255" y="1170" width="250" height="80" rx="8" fill="var(--teal-fill, #085041)" stroke="var(--teal-stroke, #5dcaa5)" stroke-width="0.5"/>
+    <text x="380" y="1195" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--teal-title, #9fe1cb)">Cleanup worker</text>
+    <text x="380" y="1217" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">Redis fast path + PostgreSQL fallback</text>
+    <text x="380" y="1236" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--teal-sub, #5dcaa5)">single winner across API instances</text>
+  </g>
+
+  <line x1="505" y1="1210" x2="548" y2="1210" class="flow-danger"/>
+  <g>
+    <rect x="550" y="1180" width="160" height="60" rx="8" fill="var(--red-fill, #791f1f)" stroke="var(--red-stroke, #f09595)" stroke-width="0.5"/>
+    <text x="630" y="1201" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--red-title, #f7c1c1)">Hard delete</text>
+    <text x="630" y="1222" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--red-sub, #f09595)">PostgreSQL + S3</text>
+  </g>
+
+  <!-- Operations -->
+  <g>
+    <rect x="60" y="1350" width="220" height="60" rx="8" fill="var(--blue-fill, #0c447c)" stroke="var(--blue-stroke, #85b7eb)" stroke-width="0.5"/>
+    <text x="170" y="1372" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--blue-title, #b5d4f4)">dbmate migrations</text>
+    <text x="170" y="1393" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--blue-sub, #85b7eb)">versioned SQL · up + down</text>
+  </g>
+  <path d="M60 1380 H24 V915 H58" class="flow-control"/>
+
+  <g>
+    <rect x="320" y="1350" width="220" height="60" rx="8" fill="var(--purple-fill, #3c3489)" stroke="var(--purple-stroke, #afa9ec)" stroke-width="0.5"/>
+    <text x="430" y="1372" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--purple-title, #cecbf6)">OpenTelemetry</text>
+    <text x="430" y="1393" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--purple-sub, #afa9ec)">HTTP · psycopg · Redis · AMQP</text>
+  </g>
+
+  <line x1="540" y1="1380" x2="568" y2="1380" class="flow"/>
+  <text x="554" y="1372" class="label" text-anchor="middle">OTLP</text>
+  <g>
+    <rect x="570" y="1350" width="140" height="60" rx="8" fill="var(--gray-fill, #444441)" stroke="var(--gray-stroke, #b4b2a9)" stroke-width="0.5"/>
+    <text x="640" y="1372" class="title" text-anchor="middle" dominant-baseline="central" fill="var(--gray-title, #d3d1c7)">Jaeger</text>
+    <text x="640" y="1393" class="sub" text-anchor="middle" dominant-baseline="central" fill="var(--gray-sub, #b4b2a9)">end-to-end traces</text>
+  </g>
+</svg>
