@@ -42,6 +42,11 @@ This isn't just a CRUD API. It demonstrates:
 - 🔒 **Distributed Locking** - Redis-based lock on expiry worker, safe for multi-instance deployments
 - 💣 **Burn After Read** - secrets auto-delete after max views (DB trigger enforced)
 - 🔗 **Signed Share Links** - stateless HMAC tokens + QR codes
+- 👥 **Recipient Allow Lists** - restrict secrets to verified email addresses and retain view history
+- 🌐 **Location Policies** - restrict signed links by CIDR, country, or both
+- 🗂️ **Secret Versioning** - conflict-safe text and file updates, restoration, and re-encryption with rotated DEKs
+- 📎 **Encrypted File Sharing** - ClamAV scanning before encrypted S3-compatible storage
+- 📏 **Per-user Quotas** - atomic Redis reservations for active-secret and file-storage limits
 - 🔐 **JWT Auth** - access tokens + rotating refresh tokens with revocation
 - 🛡️ **RBAC** - `readonly -> user -> admin` role hierarchy (backed by enums for type safety)
 - 🚦 **Rate Limiting** - atomic sliding window per user/IP via Redis Lua script
@@ -95,16 +100,22 @@ Notifications (email + webhook) are now dispatched via **RabbitMQ** instead of d
 
 ## Testing
 
-Two layers, run separately since they need different things:
+The backend and CLI suites run separately because they use different toolchains:
 
 ```bash
 pip install -r requirements.txt -r requirements-dev.txt
 
 pytest tests/unit -v          # no external services needed
 pytest tests/integration -v   # needs Docker running (spins up real Postgres + Redis)
+
+cd cli
+go test -race ./...
+go vet ./...
 ```
 
-**Unit tests** (`tests/unit/`) cover pure logic with no I/O: DEK/KEK wrap-unwrap round trips and tamper detection in the encryption helpers, JWT and signed-share-token creation/validation/expiry, password hashing, and the branching logic in `get_current_user` (wrong token type, revoked session, inactive user).
+**Unit tests** (`tests/unit/`) cover encryption and tamper detection, JWT and
+signed-link validation, location policies, ClamAV protocol handling, file
+cryptography, and trace-context propagation.
 
 **Integration tests** (`tests/integration/`) run against real, ephemeral Postgres and Redis containers via [Testcontainers](https://testcontainers.com/) - not mocks - running the actual dbmate migrations (requires the `dbmate` binary on PATH), so the real triggers (`calculate_expiration`, `delete_secret_if_fully_viewed`, etc.) are exercised exactly as they run in production. These specifically stress-test the concurrency guarantees the architecture claims to provide:
 
@@ -112,8 +123,19 @@ pytest tests/integration -v   # needs Docker running (spins up real Postgres + R
 - Double-deletion prevention: 10 concurrent instances racing to delete the same secret, asserting exactly one DELETE and one audit log entry
 - The rate limiter's Lua script atomicity: firing 2× the configured limit concurrently and asserting exactly the configured number succeed
 - The fallback sweep's global lock, and its three cleanup paths (expired/over-viewed secrets, inactive users past their deletion grace period, revoked/expired sessions)
+- Email allow lists, verified-recipient access, view tracking, version restore,
+  and CIDR/country policy behavior
+- Malware rejection, encrypted file round trips, tamper detection, and the
+  scan-before-storage ordering guarantee
+- Atomic secret and file-byte quota reservations under concurrent requests
+- Migration apply, rollback, and reapply against a disposable database
 
 This is also how a real off-by-one bug in the rate limiter's boundary condition got caught - the Lua script and the Python caller disagreed about what a returned count meant on the accept path vs. the reject path, silently rejecting the one request that should have been allowed at exactly the configured limit.
+
+The Go suite uses in-process HTTP and SMTP fakes, so it does not require the
+backend to be running. It covers every API client method, automatic token
+refresh, command workflows, multipart uploads and downloads, configuration,
+validation failures, and output formatting.
 
 ---
 
@@ -134,7 +156,11 @@ POST /api/secrets/{id}  (FastAPI - auto-instrumented)
           └── amqp.consume.webhook   (separate process, minutes later - same trace)
 ```
 
-FastAPI, Postgres (`psycopg`), and Redis are covered by official OpenTelemetry auto-instrumentation with no manual span code required (`app/core/tracing.py`). RabbitMQ has **no official instrumentation for `aio-pika`**, so that hop is bridged manually (`app/core/amqp_tracing.py`): the publisher injects the current trace context into the AMQP message headers as it publishes, and the consumer - running later, in a completely separate async task with no shared Python state - extracts that context back out and continues the same trace. Retries through the dead-letter queue reuse the original headers, so a failed-then-retried notification shows up as more spans on the *same* trace rather than a disconnected one.
+FastAPI, Postgres (`psycopg`), Redis, HTTPX, and the S3 client (`botocore`) use
+official OpenTelemetry instrumentation configured in `app/core/tracing.py`.
+RabbitMQ has no official instrumentation for `aio-pika`, so
+`app/core/amqp_tracing.py` injects W3C trace context into message headers and
+extracts it in consumers and retry workers.
 
 Background workers (`cleanup_service.py`'s expiry deletion and fallback sweep) get their own manually-created root spans, since they run on a timer/event loop rather than inside an HTTP request - without this, their DB/Redis spans would have no parent to attach to.
 
@@ -247,6 +273,7 @@ POST /api/auth/verification/confirm { code }                 Verify account emai
 POST   /api/secrets                    Create a versioned text secret (auth required)
 GET    /api/secrets/{id}               Retrieve via share URL (?token=&access_password=)
 POST   /api/secrets/{id}               Retrieve programmatically (token in query, password in body)
+GET    /api/secrets/view/{id}          Browser-friendly retrieval page
 GET    /api/secrets/{id}/info          Metadata only - no content, no auth required
 DELETE /api/secrets/{id}               Hard-delete (owner or admin)
 GET    /api/secrets                    List own secrets (paginated + filtered, auth required)
@@ -284,29 +311,41 @@ GET /api/stats                             Active secrets, total created, total 
 ## Go CLI — Quick Start
 
 ```bash
-cd phantom
-go build -o phantom.exe .
+cd cli
+go build -o phantom .
+
+# Point the CLI at a non-default API when needed
+./phantom config set-url http://localhost:8000
 
 # Register and log in
-phantom auth register
-phantom auth login
-phantom auth request-verification
-phantom auth verify-email
+./phantom auth register
+./phantom auth login
+./phantom auth request-verification
+./phantom auth verify-email
 
 # Work with secrets
-phantom share "database password" --allow-email alice@example.com --allow-email bob@example.com
-phantom get <share-url>
-phantom views <share-url-or-id>
-phantom list
-phantom delete <share-url-or-id>
+./phantom share "database password" --allow-email alice@example.com
+./phantom share --file ./credentials.pdf --expires 12h
+SHARE_URL="https://example.com/api/secrets/SECRET_ID?token=SIGNED_TOKEN"
+./phantom get "$SHARE_URL"
+./phantom update "$SHARE_URL" "rotated password" --expected-version 1
+./phantom versions "$SHARE_URL"
+./phantom restore "$SHARE_URL" 1
+./phantom policy "$SHARE_URL" --allow-cidr 203.0.113.0/24 --allow-country IN
+./phantom views "$SHARE_URL"
+./phantom quota
+./phantom list
 
 # Admin
-phantom admin users
-phantom admin audit-logs
+./phantom admin users
+./phantom admin quota USER_ID --max-secrets 200 --max-file-bytes 2147483648
+./phantom audit --severity warning
 
 # Utilities
-phantom ping
-phantom stats
+./phantom config set-smtp --user me@example.com --password APP_PASSWORD --from me@example.com
+./phantom ping "$SHARE_URL" --to recipient@example.com
+./phantom stats
+./phantom health
 ```
 
 The CLI persists your base URL and auth tokens locally so you don't need to pass them on every command.
@@ -321,17 +360,43 @@ git clone https://github.com/superb-striker/phantom-share
 cd phantom-share
 ```
 
-Create a `.env` file:
+Generate the three independent application secrets, then create `.env` using
+the complete template below:
+
+```bash
+python -c "import base64,os; print(base64.b64encode(os.urandom(32)).decode())"
+python -c "import secrets; print(secrets.token_hex(32))"
+python -c "import secrets; print(secrets.token_hex(32))"
+```
 
 ```env
-SECRET_ENCRYPTION_KEY=
-JWT_SECRET_KEY=
-SIGNED_URL_SECRET=
-DATABASE_URL=
-REDIS_URL=
-RABBITMQ_URL=
+APP_NAME=Phantom Share
+APP_VERSION=2.0.0
+DEBUG=true
+BASE_URL=http://localhost:8000
+
+DATABASE_URL=host=localhost port=5432 dbname=phantom user=phantom password=change-me
+DBMATE_DATABASE_URL=postgres://phantom:change-me@localhost:5432/phantom?sslmode=disable
+DB_MIN_POOL=2
+DB_MAX_POOL=10
+REDIS_URL=redis://localhost:6379/0
+RABBITMQ_URL=amqp://phantom:change-me@localhost:5672/
+
+CHACHA_KEY_BYTES=32
+SECRET_ENCRYPTION_KEY=<first-generated-value>
+JWT_SECRET_KEY=<second-generated-value>
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=15
+JWT_REFRESH_TOKEN_EXPIRE_DAYS=30
+SIGNED_URL_SECRET=<third-generated-value>
+
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
 SMTP_USERNAME=
 SMTP_PASSWORD=
+SMTP_FROM=
+CORS_ORIGINS=["http://localhost:3000"]
+
 VIEW_HISTORY_RETENTION_DAYS=30
 MAX_SECRET_VERSIONS=100
 MAX_FILE_BYTES=52428800
@@ -358,19 +423,21 @@ OTEL_TRACES_EXPORTER=otlp
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 OTEL_EXPORTER_OTLP_INSECURE=true
 OTEL_TRACE_SAMPLE_RATIO=1.0
+OTEL_EXCLUDED_URLS=/health
 
-# Used by docker-compose to provision Postgres and RabbitMQ containers
-POSTGRES_USERNAME=
-POSTGRES_PASSWORD=
-RABBITMQ_USERNAME=
-RABBITMQ_PASSWORD=
+# Used by Docker Compose to provision infrastructure
+POSTGRES_USERNAME=phantom
+POSTGRES_PASSWORD=change-me
+RABBITMQ_USERNAME=phantom
+RABBITMQ_PASSWORD=change-me
 MINIO_ROOT_USER=phantom
 MINIO_ROOT_PASSWORD=phantom-local-development
 ```
 
 > **Note:** `DATABASE_URL`, `REDIS_URL`, `RABBITMQ_URL`, and `OTEL_EXPORTER_OTLP_ENDPOINT` from `.env` are overridden by the `environment:` block in `docker-compose.yml` for the `phantom-share` service, so the app talks to `postgres`, `redis`, `rabbitmq`, and `otel-collector` by container/service name instead of `localhost`. The values above still matter for anyone running the app outside Docker (see fallback section below).
 
-Build and start everything (API + Postgres + Redis + RabbitMQ + MinIO + ClamAV):
+Build and start the API, migration runner, Postgres, Redis, RabbitMQ, MinIO,
+ClamAV, OpenTelemetry Collector, and Jaeger:
 
 ```bash
 docker compose up --build
@@ -392,7 +459,7 @@ Traces (Jaeger UI) -> http://localhost:16686
 To stop everything:
 
 ```bash
-docker compose down          # add -v to also wipe the named volumes (postgres_data, rabbitmq_data, redis_data)
+docker compose down          # add -v to also wipe Postgres, RabbitMQ, Redis, MinIO, and ClamAV data
 ```
 
 <details>
@@ -406,25 +473,22 @@ source env/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 
-Install [dbmate](https://github.com/amacneil/dbmate#installation) (tested with 2.35.1) and PostgreSQL client tools (`pg_dump`), then configure `DBMATE_DATABASE_URL` in `.env` as described below and run:
+Install [dbmate](https://github.com/amacneil/dbmate#installation) (tested with
+2.35.1) and PostgreSQL client tools (`pg_dump`), then configure
+`DBMATE_DATABASE_URL` in `.env` as described below.
+
+Set up PostgreSQL, Redis, RabbitMQ, S3-compatible storage, and ClamAV. For a
+local environment, the easiest option is to run those dependencies from the
+Compose file while running the API process on the host:
+
+```bash
+docker compose up -d postgres redis rabbitmq minio minio-init clamav otel-collector jaeger
+```
+
+Apply migrations and start the server:
 
 ```bash
 ./scripts/dbmate up
-```
-
-Setup Redis and RabbitMQ:
-
-```bash
-# Ubuntu
-sudo apt-get install -y redis-server
-```
-
-Start services and the server:
-
-```bash
-sudo systemctl start redis-server
-redis-cli ping              # EXPECTED OUTPUT: PONG
-docker run -d --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3-management
 uvicorn main:app --reload
 ```
 
@@ -441,7 +505,9 @@ Interactive docs -> http://localhost:8000/docs
 - All list endpoints paginated - no unbounded queries.
 - Expiry worker holds a **Redis distributed lock** - safe to run multiple instances without duplicate deletions.
 - RabbitMQ consumers can be scaled independently of the API to handle notification load.
-- Local/dev orchestration via Docker Compose - Postgres, Redis, RabbitMQ, Jaeger, and the API each run in their own container, with healthchecks gating startup order so the app never starts before its dependencies are ready.
+- Local development uses Docker Compose for Postgres, Redis, RabbitMQ, MinIO,
+  ClamAV, the OpenTelemetry Collector, Jaeger, migrations, and the API, with
+  health checks and dependency conditions gating startup.
 - Distributed tracing means a slow or failing request can be diagnosed by following one trace across every service it touched, instead of correlating logs by hand across four different containers.
 
 
